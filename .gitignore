@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Temp files
+temp/
+tmp/
+
+# Prompts / planning docs
+.prompts/
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Editor
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
