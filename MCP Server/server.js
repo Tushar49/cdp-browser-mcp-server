@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * CDP Browser Automation — MCP Server  v4.0
+ * CDP Browser Automation — MCP Server  v4.1
  *
  * 9 consolidated tools with ~50 sub-actions for full browser automation.
  * v4 upgrades: stable element refs (backendNodeId), auto-waiting, incremental snapshots,
@@ -35,6 +35,7 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import WebSocket from "ws";
+import { randomUUID } from "crypto";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, readdirSync, statSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -114,6 +115,7 @@ const injectedScripts = new Map();      // sessionId → [ { identifier, descrip
 const refMaps = new Map();              // sessionId → Map<uid, backendNodeId>
 const lastSnapshots = new Map();        // sessionId → { snapshot, url, title }
 const agentSessions = new Map();        // agentSessionId → { lastActivity, tabIds: Set<tabId> }
+const processSessionId = randomUUID();  // auto-assigned per-process session ID
 
 const downloads = new Map();              // sessionId → [{guid, url, suggestedFilename, state, receivedBytes, totalBytes}]
 
@@ -506,6 +508,10 @@ async function detachTab(tabId) {
   refMaps.delete(sid);
   lastSnapshots.delete(sid);
   downloads.delete(sid);
+  // Remove tabId from all agent sessions to prevent stale references
+  for (const [, agentSession] of agentSessions) {
+    agentSession.tabIds.delete(tabId);
+  }
 }
 
 // ─── Tab Listing ────────────────────────────────────────────────────
@@ -1036,6 +1042,8 @@ const TOOLS = [
         query: { type: "string", description: "Search text for 'find' action." },
         tabId: { type: "string", description: "Tab ID for close/activate/info." },
         url: { type: "string", description: "URL for 'new' action." },
+        showAll: { type: "boolean", description: "Show all browser tabs, not just session-owned ones (for list action)." },
+        sessionId: { type: "string", description: "Optional session ID to connect to a specific session. Auto-assigned if omitted." },
       },
       required: ["action"],
     },
@@ -1096,6 +1104,7 @@ const TOOLS = [
         margin: { type: "object", description: "PDF margins {top, bottom, left, right} in inches.", properties: { top: { type: "number" }, bottom: { type: "number" }, left: { type: "number" }, right: { type: "number" } } },
         script: { type: "string", description: "Script for inject action." },
         enabled: { type: "boolean", description: "Enable/disable for bypass_csp." },
+        sessionId: { type: "string", description: "Optional session ID to connect to a specific session. Auto-assigned if omitted." },
       },
       required: ["action", "tabId"],
     },
@@ -1156,6 +1165,7 @@ const TOOLS = [
         y: { type: "number", description: "Scroll-to Y position." },
         files: { type: "array", items: { type: "string" }, description: "File paths for upload." },
         checked: { type: "boolean", description: "Desired checked state for check action." },
+        sessionId: { type: "string", description: "Optional session ID to connect to a specific session. Auto-assigned if omitted." },
       },
       required: ["action", "tabId"],
     },
@@ -1193,6 +1203,7 @@ const TOOLS = [
         function: { type: "string", description: "JS function for call, receives element as arg. E.g. '(el) => el.textContent'" },
         uid: { type: "number", description: "Element uid for call." },
         selector: { type: "string", description: "CSS selector for call." },
+        sessionId: { type: "string", description: "Optional session ID to connect to a specific session. Auto-assigned if omitted." },
       },
       required: ["action", "tabId"],
     },
@@ -1234,6 +1245,7 @@ const TOOLS = [
         clear: { type: "boolean", description: "Clear captured data after returning." },
         last: { type: "number", description: "Return only last N items." },
         requestId: { type: "string", description: "Request ID for full body retrieval." },
+        sessionId: { type: "string", description: "Optional session ID to connect to a specific session. Auto-assigned if omitted." },
       },
       required: ["action", "tabId"],
     },
@@ -1249,7 +1261,7 @@ const TOOLS = [
       "- viewport: Set viewport dimensions (optional: {width, height, deviceScaleFactor, mobile, touch, landscape})",
       "- colorScheme: Emulate preferred color scheme (optional: dark|light|auto)",
       "- userAgent: Override the browser user agent string (optional: string)",
-      "- geolocation: Spoof geolocation (optional: {latitude, longitude})",
+      "- geolocation: Spoof geolocation (optional: {latitude, longitude, accuracy, altitude})",
       "- cpuThrottle: Throttle CPU speed — 1 = normal, 4 = 4x slower (optional: number)",
       "- timezone: Override timezone (optional: string, e.g. 'America/New_York')",
       "- locale: Override locale (optional: string, e.g. 'fr-FR')",
@@ -1277,7 +1289,7 @@ const TOOLS = [
         viewport: { type: "object", description: "Viewport {width, height, deviceScaleFactor, mobile, touch, landscape}.", properties: { width: { type: "number" }, height: { type: "number" }, deviceScaleFactor: { type: "number" }, mobile: { type: "boolean" }, touch: { type: "boolean" }, landscape: { type: "boolean" } } },
         colorScheme: { type: "string", enum: ["dark", "light", "auto"], description: "Color scheme." },
         userAgent: { type: "string", description: "User agent string." },
-        geolocation: { type: "object", properties: { latitude: { type: "number" }, longitude: { type: "number" } } },
+        geolocation: { type: "object", properties: { latitude: { type: "number" }, longitude: { type: "number" }, accuracy: { type: "number", description: "GPS accuracy in meters (default: 100)." }, altitude: { type: "number", description: "Altitude in meters (optional)." } }, description: "Spoof geolocation: {latitude, longitude, accuracy?, altitude?}." },
         cpuThrottle: { type: "number", description: "CPU throttle rate (1 = normal)." },
         timezone: { type: "string", description: "Timezone, e.g. 'America/New_York'." },
         locale: { type: "string", description: "Locale, e.g. 'fr-FR'." },
@@ -1289,6 +1301,7 @@ const TOOLS = [
         blockUrls: { type: "array", items: { type: "string" }, description: "URLs to block." },
         extraHeaders: { type: "object", description: "Extra HTTP headers." },
         reset: { type: "boolean", description: "Reset all emulation overrides." },
+        sessionId: { type: "string", description: "Optional session ID to connect to a specific session. Auto-assigned if omitted." },
       },
       required: ["tabId"],
     },
@@ -1331,6 +1344,7 @@ const TOOLS = [
         url: { type: "string", description: "URL for delete_cookies." },
         origin: { type: "string", description: "Origin for clear_data." },
         types: { type: "string", description: "Storage types: 'cookies,local_storage,indexeddb,cache_storage' or 'all'." },
+        sessionId: { type: "string", description: "Optional session ID to connect to a specific session. Auto-assigned if omitted." },
       },
       required: ["action", "tabId"],
     },
@@ -1377,6 +1391,7 @@ const TOOLS = [
         status: { type: "number", description: "Response status for fulfill." },
         body: { type: "string", description: "Response body for fulfill." },
         reason: { type: "string", enum: ["Failed", "Aborted", "TimedOut", "AccessDenied", "ConnectionClosed", "ConnectionReset", "ConnectionRefused", "ConnectionAborted", "ConnectionFailed", "NameNotResolved", "InternetDisconnected", "AddressUnreachable", "BlockedByClient", "BlockedByResponse"], description: "Failure reason." },
+        sessionId: { type: "string", description: "Optional session ID to connect to a specific session. Auto-assigned if omitted." },
       },
       required: ["action", "tabId"],
     },
@@ -1406,6 +1421,7 @@ const TOOLS = [
       properties: {
         action: { type: "string", enum: ["disconnect_tab", "disconnect_all", "clean_temp", "status", "list_sessions"], description: "Cleanup action." },
         tabId: { type: "string", description: "Tab ID for disconnect_tab." },
+        sessionId: { type: "string", description: "Optional session ID to connect to a specific session. Auto-assigned if omitted." },
       },
       required: ["action"],
     },
@@ -2434,12 +2450,71 @@ async function handleEmulate(args) {
   }
 
   if (args.geolocation) {
-    await cdp("Emulation.setGeolocationOverride", {
+    const geoParams = {
       latitude: args.geolocation.latitude,
       longitude: args.geolocation.longitude,
-      accuracy: 100,
-    }, sess);
-    results.push(`Geolocation: ${args.geolocation.latitude}, ${args.geolocation.longitude}`);
+      accuracy: args.geolocation.accuracy ?? 100,
+    };
+    if (args.geolocation.altitude !== undefined) geoParams.altitude = args.geolocation.altitude;
+    await cdp("Emulation.setGeolocationOverride", geoParams, sess);
+    // Auto-grant geolocation permission so navigator.geolocation works in JS
+    let permGranted = false;
+    try {
+      const { result: originResult } = await cdp("Runtime.evaluate", { expression: "location.origin", returnByValue: true }, sess);
+      const origin = originResult?.value;
+      // Get browserContextId for the tab to scope the permission grant correctly
+      let browserContextId;
+      try {
+        const { targetInfo } = await cdp("Target.getTargetInfo", { targetId: args.tabId });
+        browserContextId = targetInfo?.browserContextId;
+      } catch { /* ok */ }
+      const grantParams = { permissions: ["geolocation"] };
+      if (origin && origin !== "null") grantParams.origin = origin;
+      if (browserContextId) grantParams.browserContextId = browserContextId;
+      await cdp("Browser.grantPermissions", grantParams);
+      // Verify the permission was actually granted
+      const { result: permCheck } = await cdp("Runtime.evaluate", {
+        expression: "navigator.permissions.query({name:'geolocation'}).then(r=>r.state)",
+        returnByValue: true, awaitPromise: true,
+      }, sess);
+      permGranted = permCheck?.value === "granted";
+    } catch { /* ok */ }
+    if (!permGranted) {
+      // Fallback: try Browser.setPermission (Chrome 93+)
+      try {
+        const { result: originResult2 } = await cdp("Runtime.evaluate", { expression: "location.origin", returnByValue: true }, sess);
+        const origin2 = originResult2?.value;
+        const setPermParams = { permission: { name: "geolocation" }, setting: "granted" };
+        if (origin2 && origin2 !== "null") setPermParams.origin = origin2;
+        await cdp("Browser.setPermission", setPermParams);
+        const { result: permCheck2 } = await cdp("Runtime.evaluate", {
+          expression: "navigator.permissions.query({name:'geolocation'}).then(r=>r.state)",
+          returnByValue: true, awaitPromise: true,
+        }, sess);
+        permGranted = permCheck2?.value === "granted";
+      } catch { /* ok */ }
+    }
+    if (!permGranted) {
+      // Final fallback: inject JS geolocation override directly
+      const geoScript = `(function(){
+        const _lat=${geoParams.latitude},_lng=${geoParams.longitude},_acc=${geoParams.accuracy},_alt=${geoParams.altitude !== undefined ? geoParams.altitude : 'null'};
+        const _pos={coords:{latitude:_lat,longitude:_lng,accuracy:_acc,altitude:_alt,altitudeAccuracy:null,heading:null,speed:null},timestamp:Date.now()};
+        const _origGCP=navigator.geolocation.getCurrentPosition.bind(navigator.geolocation);
+        const _origWP=navigator.geolocation.watchPosition.bind(navigator.geolocation);
+        navigator.geolocation.getCurrentPosition=function(s,e,o){setTimeout(()=>s(_pos),0);};
+        navigator.geolocation.watchPosition=function(s,e,o){setTimeout(()=>s(_pos),0);return 1;};
+      })();`;
+      try {
+        await cdp("Runtime.evaluate", { expression: geoScript }, sess);
+        // Also inject into new documents
+        await ensureDomain(sess, "Page");
+        await cdp("Page.addScriptToEvaluateOnNewDocument", { source: geoScript }, sess);
+      } catch { /* ok */ }
+    }
+    let geoMsg = `Geolocation: ${args.geolocation.latitude}, ${args.geolocation.longitude} (accuracy: ${geoParams.accuracy}m`;
+    if (geoParams.altitude !== undefined) geoMsg += `, altitude: ${geoParams.altitude}m`;
+    geoMsg += ")";
+    results.push(geoMsg);
   }
 
   if (args.cpuThrottle) {
@@ -2861,39 +2936,44 @@ async function handleTool(name, args) {
   const handler = HANDLERS[name];
   if (!handler) return fail(`Unknown tool: ${name}`);
 
-  // ── Per-agent session routing ──
-  const sessionId = args.sessionId;
-  if (sessionId) {
-    delete args.sessionId; // don't pass down to handlers
-    const now = Date.now();
+  // ── Per-agent session routing (auto-assigned per process, or explicit) ──
+  const sessionId = args.sessionId || processSessionId;
+  delete args.sessionId; // don't pass down to handlers
+  const now = Date.now();
 
-    // Expire stale sessions
-    for (const [id, s] of agentSessions) {
-      if (now - s.lastActivity > SESSION_TTL) agentSessions.delete(id);
-    }
-
-    // Get or create session
-    let session = agentSessions.get(sessionId);
-    if (!session) {
-      session = { lastActivity: now, tabIds: new Set() };
-      agentSessions.set(sessionId, session);
-    }
-    session.lastActivity = now;
-
-    // Track tab association
-    if (args.tabId) {
-      session.tabIds.add(args.tabId);
-    }
-
-    // For tab listing, filter to session-owned tabs if session has any
-    if (name === "tabs" && args.action === "list" && session.tabIds.size > 0) {
-      const result = await (typeof handler === "function" ? handler(args) : handler[args.action](args));
-      // Tag the result so the agent knows which tabs are theirs
-      if (result.content && result.content[0]) {
-        result.content[0].text = `[session: ${sessionId}] ` + result.content[0].text;
+  // Expire stale sessions and clean up their CDP state
+  for (const [id, s] of agentSessions) {
+    if (now - s.lastActivity > SESSION_TTL) {
+      for (const tid of s.tabIds) {
+        try { await detachTab(tid); } catch { /* ok */ }
       }
-      return result;
+      agentSessions.delete(id);
     }
+  }
+
+  // Get or create session
+  let session = agentSessions.get(sessionId);
+  if (!session) {
+    session = { lastActivity: now, tabIds: new Set() };
+    agentSessions.set(sessionId, session);
+  }
+  session.lastActivity = now;
+
+  // Track tab association
+  if (args.tabId) {
+    session.tabIds.add(args.tabId);
+  }
+
+  // For tab listing, enforce session ownership (filter to session tabs unless showAll)
+  if (name === "tabs" && args.action === "list" && session.tabIds.size > 0 && !args.showAll) {
+    const allTabs = await getTabs();
+    const ownedTabs = allTabs.filter(t => session.tabIds.has(t.targetId));
+    if (!ownedTabs.length) return ok("No session-owned tabs. Use showAll: true to see all browser tabs.");
+    const lines = ownedTabs.map((t, i) => {
+      const c = activeSessions.has(t.targetId) ? " [connected]" : "";
+      return `${i + 1}. [${t.targetId}]${c}\n   ${t.title}\n   ${t.url}`;
+    });
+    return ok(`[session: ${sessionId}] ${ownedTabs.length} tab(s):\n\n${lines.join("\n\n")}`);
   }
 
   // ── Modal state guard ──
@@ -2952,7 +3032,7 @@ function appendConsoleErrors(result, tabId) {
 // ─── MCP Server Setup ───────────────────────────────────────────────
 
 const server = new Server(
-  { name: "cdp-browser", version: "4.0.0" },
+  { name: "cdp-browser", version: "4.1.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -2968,10 +3048,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 // ─── Periodic Session Cleanup ────────────────────────────────────────
 
-setInterval(() => {
+setInterval(async () => {
   const now = Date.now();
   for (const [id, s] of agentSessions) {
     if (now - s.lastActivity > SESSION_TTL) {
+      // Clean up CDP sessions for expired agent sessions
+      for (const tid of s.tabIds) {
+        try { await detachTab(tid); } catch { /* ok */ }
+      }
       agentSessions.delete(id);
     }
   }
