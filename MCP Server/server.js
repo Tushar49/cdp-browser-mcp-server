@@ -35,7 +35,7 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import WebSocket from "ws";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, readdirSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, readdirSync, statSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -57,6 +57,7 @@ function ensureTempDir() {
 
 function writeTempFile(name, content, encoding = "utf8") {
   ensureTempDir();
+  autoCleanupTempFiles();
   const p = join(TEMP_DIR, name);
   writeFileSync(p, content, encoding);
   return p;
@@ -70,6 +71,28 @@ function cleanupTempFiles() {
     try { unlinkSync(join(TEMP_DIR, f)); count++; } catch { /* ok */ }
   }
   return count;
+}
+
+const MAX_TEMP_FILES = 50;
+const MAX_TEMP_AGE_MS = 30 * 60 * 1000; // 30 minutes
+
+function autoCleanupTempFiles() {
+  if (!existsSync(TEMP_DIR)) return;
+  const files = readdirSync(TEMP_DIR);
+  if (files.length <= MAX_TEMP_FILES) return;
+  // Sort by creation time and remove oldest
+  const withStats = files.map(f => {
+    const p = join(TEMP_DIR, f);
+    try { return { path: p, mtime: statSync(p).mtimeMs }; } catch { return null; }
+  }).filter(Boolean);
+  withStats.sort((a, b) => a.mtime - b.mtime);
+  // Remove files until we're at half the limit, OR remove files older than MAX_TEMP_AGE_MS
+  const now = Date.now();
+  let remaining = files.length;
+  for (const { path, mtime } of withStats) {
+    if (remaining <= MAX_TEMP_FILES / 2 && now - mtime < MAX_TEMP_AGE_MS) break;
+    try { unlinkSync(path); remaining--; } catch {}
+  }
 }
 
 // ─── Browser Connection ─────────────────────────────────────────────
@@ -495,215 +518,149 @@ async function getTabs() {
 
 // ─── Accessibility Tree / Snapshot ──────────────────────────────────
 
-// Walk CDP DOM tree to collect data-cdp-ref → backendNodeId mappings
-function collectRefsFromDOMTree(node, result = new Map()) {
-  if (node.attributes) {
-    // CDP attributes is a flat array: [name1, value1, name2, value2, ...]
-    for (let i = 0; i < node.attributes.length; i += 2) {
-      if (node.attributes[i] === "data-cdp-ref") {
-        result.set(parseInt(node.attributes[i + 1], 10), node.backendNodeId);
-        break;
-      }
+function collectFrameIds(frameTree) {
+  const ids = [frameTree.frame.id];
+  if (frameTree.childFrames) {
+    for (const child of frameTree.childFrames) {
+      ids.push(...collectFrameIds(child));
     }
   }
-  if (node.children) {
-    for (const child of node.children) collectRefsFromDOMTree(child, result);
-  }
-  if (node.shadowRoots) {
-    for (const root of node.shadowRoots) collectRefsFromDOMTree(root, result);
-  }
-  if (node.contentDocument) {
-    collectRefsFromDOMTree(node.contentDocument, result);
-  }
-  return result;
+  return ids;
 }
 
 async function buildSnapshot(sessionId) {
-  const result = await cdp("Runtime.evaluate", {
-    expression: `(() => {
-  const INTERACTIVE = new Set(["a","button","input","select","textarea","details","summary","option"]);
-  const SKIP_TAGS = new Set(["script","style","noscript","template","path","br","wbr","meta","link"]);
+  await ensureDomain(sessionId, "Accessibility");
 
-  // Remove old ref markers first
-  document.querySelectorAll("[data-cdp-ref]").forEach(el => el.removeAttribute("data-cdp-ref"));
-
-  let uidCounter = 0;
-
-  function getRole(el) {
-    const explicit = el.getAttribute && el.getAttribute("role");
-    if (explicit) return explicit;
-    const tag = el.tagName.toLowerCase();
-    if (tag === "a" && el.href) return "link";
-    if (tag === "button" || (tag === "input" && el.type === "submit") || (tag === "input" && el.type === "button")) return "button";
-    if (tag === "input") {
-      const t = (el.type || "text").toLowerCase();
-      if (t === "checkbox") return "checkbox";
-      if (t === "radio") return "radio";
-      if (t === "range") return "slider";
-      if (t === "search") return "searchbox";
-      if (t === "file") return "button";
-      if (t === "hidden") return null;
-      return "textbox";
-    }
-    if (tag === "textarea") return "textbox";
-    if (tag === "select") return "combobox";
-    if (tag === "option") return "option";
-    if (tag === "img") return "img";
-    if (tag === "svg") return "img";
-    if (tag === "video") return "video";
-    if (tag === "audio") return "audio";
-    if (tag === "nav") return "navigation";
-    if (tag === "main") return "main";
-    if (tag === "header") return "banner";
-    if (tag === "footer") return "contentinfo";
-    if (tag === "aside") return "complementary";
-    if (tag === "form") return "form";
-    if (tag === "table") return "table";
-    if (tag === "thead" || tag === "tbody" || tag === "tfoot") return "rowgroup";
-    if (tag === "tr") return "row";
-    if (tag === "td") return "cell";
-    if (tag === "th") return "columnheader";
-    if (tag === "ul" || tag === "ol") return "list";
-    if (tag === "li") return "listitem";
-    if (tag === "section") return el.getAttribute("aria-label") ? "region" : null;
-    if (tag === "dialog") return "dialog";
-    if (tag.match(/^h[1-6]$/)) return "heading";
-    if (tag === "label") return "label";
-    if (tag === "fieldset") return "group";
-    if (tag === "legend") return "legend";
-    if (tag === "progress") return "progressbar";
-    if (tag === "meter") return "meter";
-    if (tag === "output") return "status";
-    if (tag === "iframe") return "document";
-    if (el.getAttribute("tabindex") !== null) return "generic";
-    if (el.getAttribute("onclick") || el.getAttribute("data-action")) return "generic";
-    return null;
-  }
-
-  function getName(el) {
-    const label = el.getAttribute && el.getAttribute("aria-label");
-    if (label) return label;
-    const labelId = el.getAttribute && el.getAttribute("aria-labelledby");
-    if (labelId) {
-      const parts = labelId.split(" ").map(id => {
-        const lel = document.getElementById(id);
-        return lel ? lel.textContent.trim() : "";
-      }).filter(Boolean);
-      if (parts.length) return parts.join(" ").substring(0, 100);
-    }
-    const tag = el.tagName.toLowerCase();
-    if (tag === "img") return el.alt || el.title || "";
-    if (tag === "input" || tag === "textarea" || tag === "select") {
-      const id = el.id;
-      if (id) {
-        const lbl = document.querySelector("label[for=" + JSON.stringify(id) + "]");
-        if (lbl) return lbl.textContent.trim().substring(0, 100);
-      }
-      return el.placeholder || el.title || el.name || "";
-    }
-    if (tag === "a" || tag === "button" || tag === "option" || tag === "summary" || tag === "label" || tag === "legend") {
-      return el.textContent.trim().substring(0, 100);
-    }
-    if (tag.match(/^h[1-6]$/)) return el.textContent.trim().substring(0, 100);
-    if (el.title) return el.title;
-    return "";
-  }
-
-  function isVisible(el) {
-    if (!el.offsetParent && getComputedStyle(el).position !== "fixed" &&
-        getComputedStyle(el).position !== "sticky" && el.tagName.toLowerCase() !== "body") return false;
-    const s = getComputedStyle(el);
-    if (s.display === "none" || s.visibility === "hidden") return false;
-    if (parseFloat(s.opacity) === 0 && !el.querySelector("[style]")) return false;
-    return true;
-  }
-
-  function getProps(el) {
-    const props = [];
-    const tag = el.tagName.toLowerCase();
-    if (el.disabled) props.push("disabled");
-    if (el.checked) props.push("checked");
-    if (el.required) props.push("required");
-    if (el.readOnly) props.push("readonly");
-    if (el.getAttribute("aria-expanded") === "true") props.push("expanded");
-    if (el.getAttribute("aria-expanded") === "false") props.push("collapsed");
-    if (el.getAttribute("aria-selected") === "true") props.push("selected");
-    if (el.getAttribute("aria-pressed") === "true") props.push("pressed");
-    if (el.getAttribute("aria-haspopup")) props.push("haspopup=" + el.getAttribute("aria-haspopup"));
-    if (el.getAttribute("aria-current")) props.push("current=" + el.getAttribute("aria-current"));
-    if (tag.match(/^h[1-6]$/)) props.push("level=" + tag[1]);
-    if (tag === "a" && el.href) props.push("url=" + el.href.substring(0, 80));
-    if (tag === "img" && el.src) props.push("src=" + el.src.substring(0, 80));
-    if ((tag === "input" || tag === "textarea") && el.value) props.push("value=" + JSON.stringify(el.value.substring(0, 80)));
-    if (tag === "option" && el.value) props.push("value=" + el.value.substring(0, 40));
-    if (tag === "select") {
-      const sel = el.options[el.selectedIndex];
-      if (sel) props.push("value=" + JSON.stringify(sel.textContent.trim().substring(0, 40)));
-    }
-    return props;
-  }
-
-  function walk(el, depth) {
-    if (!el || !el.tagName) return "";
-    const tag = el.tagName.toLowerCase();
-    if (SKIP_TAGS.has(tag)) return "";
-    if (!isVisible(el)) return "";
-    if (depth > 20) return "";
-
-    const role = getRole(el);
-    const indent = "  ".repeat(depth);
-    let output = "";
-    let id = null;
-
-    if (role) {
-      id = uidCounter++;
-      el.setAttribute("data-cdp-ref", String(id));
-      const name = getName(el);
-      const props = getProps(el);
-      const propStr = props.length ? " [" + props.join(", ") + "]" : "";
-      const nameStr = name ? ' "' + name.replace(/[\\\\\\n\\r"]/g, " ").trim().substring(0, 100) + '"' : "";
-      output += indent + "- " + role + nameStr + propStr + " [ref=" + id + "]\\n";
-    }
-
-    const children = el.children;
-    if (children && children.length > 0) {
-      const childDepth = role ? depth + 1 : depth;
-      for (let i = 0; i < children.length; i++) {
-        output += walk(children[i], childDepth);
-      }
-    } else if (!role) {
-      const t = el.textContent?.trim();
-      if (t && t.length > 0 && t.length <= 300) {
-        output += indent + '- text "' + t.replace(/[\\\\\\n\\r"]/g, " ").trim().substring(0, 150) + '"\\n';
-      }
-    }
-
-    return output;
-  }
-
-  const snapshot = walk(document.body, 0);
-  return { snapshot, count: uidCounter, url: location.href, title: document.title };
-})()`,
-    returnByValue: true,
-    awaitPromise: false,
-  }, sessionId);
-
-  if (result.exceptionDetails) {
-    throw new Error(result.exceptionDetails.exception?.description || "Snapshot failed");
-  }
-
-  // Collect stable backendNodeId refs via CDP DOM tree
+  // Get frame tree for iframe support
+  let frameIds = [];
   try {
-    await ensureDomain(sessionId, "DOM");
-    const { root } = await cdp("DOM.getDocument", { depth: -1, pierce: true }, sessionId);
-    const refs = collectRefsFromDOMTree(root);
-    refMaps.set(sessionId, refs);
-  } catch (e) {
-    // Fallback: snapshot still works, but ref resolution will fall back to CSS query
-    refMaps.set(sessionId, new Map());
+    await ensureDomain(sessionId, "Page");
+    const { frameTree } = await cdp("Page.getFrameTree", {}, sessionId);
+    frameIds = collectFrameIds(frameTree);
+  } catch {
+    // Can't get frame tree — use root frame only (getFullAXTree without frameId)
+    frameIds = [null];
   }
 
-  return result.result.value;
+  const newRefMap = new Map(); // ref (number) → backendDOMNodeId
+  let refCounter = 0;
+  let allLines = [];
+
+  for (const frameId of frameIds) {
+    try {
+      const params = {};
+      if (frameId) params.frameId = frameId;
+      const { nodes } = await cdp("Accessibility.getFullAXTree", params, sessionId);
+      if (!nodes || nodes.length === 0) continue;
+
+      // Build node lookup
+      const nodeMap = new Map();
+      for (const n of nodes) nodeMap.set(n.nodeId, n);
+
+      // Find root nodes (no parentId or parent not in this set)
+      const roots = nodes.filter(n => !n.parentId || !nodeMap.has(n.parentId));
+
+      // Prefix for sub-frames
+      const frameIndex = frameIds.indexOf(frameId);
+      const prefix = frameIndex > 0 ? `[frame ${frameIndex}] ` : "";
+
+      function renderNode(node, depth) {
+        if (node.ignored) {
+          // Still process children of ignored nodes (they may contain non-ignored content)
+          const children = (node.childIds || []).map(id => nodeMap.get(id)).filter(Boolean);
+          return children.map(c => renderNode(c, depth)).filter(Boolean).join("\n");
+        }
+
+        const role = node.role?.value;
+        if (!role || role === "none" || role === "GenericContainer" || role === "InlineTextBox") {
+          // Skip generic containers but recurse into children
+          const children = (node.childIds || []).map(id => nodeMap.get(id)).filter(Boolean);
+          return children.map(c => renderNode(c, depth)).filter(Boolean).join("\n");
+        }
+
+        const ref = ++refCounter;
+        if (node.backendDOMNodeId) {
+          newRefMap.set(ref, node.backendDOMNodeId);
+        }
+
+        const indent = "  ".repeat(depth);
+        const name = node.name?.value || "";
+        const nameStr = name ? ` "${name.replace(/[\n\r"\\]/g, " ").trim().substring(0, 120)}"` : "";
+
+        // Collect properties
+        const props = [];
+        if (node.properties) {
+          for (const p of node.properties) {
+            const val = p.value?.value;
+            if (val === undefined || val === null) continue;
+            switch (p.name) {
+              case "disabled": if (val) props.push("disabled"); break;
+              case "checked": if (val === "true" || val === true) props.push("checked"); else if (val === "mixed") props.push("mixed"); break;
+              case "expanded": props.push(val ? "expanded" : "collapsed"); break;
+              case "selected": if (val) props.push("selected"); break;
+              case "required": if (val) props.push("required"); break;
+              case "readonly": if (val) props.push("readonly"); break;
+              case "focused": if (val) props.push("focused"); break;
+              case "pressed": if (val === "true" || val === true) props.push("pressed"); break;
+              case "level": props.push("level=" + val); break;
+              case "valuetext": props.push("value=" + JSON.stringify(String(val).substring(0, 80))); break;
+              case "hasPopup": if (val && val !== "false") props.push("haspopup=" + val); break;
+              case "autocomplete": if (val && val !== "none") props.push("autocomplete=" + val); break;
+              case "modal": if (val) props.push("modal"); break;
+              case "multiselectable": if (val) props.push("multiselectable"); break;
+              case "orientation": if (val !== "none") props.push("orientation=" + val); break;
+            }
+          }
+        }
+
+        // Add value for inputs
+        if (node.value?.value !== undefined && node.value.value !== "") {
+          const v = String(node.value.value).substring(0, 80);
+          if (!props.some(p => p.startsWith("value="))) {
+            props.push("value=" + JSON.stringify(v));
+          }
+        }
+
+        const propStr = props.length ? " [" + props.join(", ") + "]" : "";
+        let line = `${indent}${prefix}- ${role}${nameStr}${propStr} [ref=${ref}]`;
+
+        // Process children
+        const children = (node.childIds || []).map(id => nodeMap.get(id)).filter(Boolean);
+        const childLines = children.map(c => renderNode(c, depth + 1)).filter(Boolean);
+
+        if (childLines.length > 0) {
+          return line + "\n" + childLines.join("\n");
+        }
+        return line;
+      }
+
+      for (const root of roots) {
+        const rendered = renderNode(root, 0);
+        if (rendered) allLines.push(rendered);
+      }
+    } catch (e) {
+      // If a sub-frame fails, continue with others
+      if (frameId) allLines.push(`  - [frame error: ${e.message?.substring(0, 60)}]`);
+    }
+  }
+
+  // Update ref map
+  refMaps.set(sessionId, newRefMap);
+
+  const snapshot = allLines.join("\n");
+
+  // Get page metadata
+  let url = "", title = "";
+  try {
+    const meta = await cdp("Runtime.evaluate", {
+      expression: `({ url: location.href, title: document.title })`,
+      returnByValue: true,
+    }, sessionId);
+    url = meta.result?.value?.url || "";
+    title = meta.result?.value?.title || "";
+  } catch {}
+
+  return { snapshot, count: refCounter, url, title };
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────
@@ -825,26 +782,53 @@ async function checkActionability(sessionId, uid, selector) {
     throw new Error(`Element <${el.tag}> "${el.label}" has zero size (${el.w}x${el.h}) — it may be hidden or inside a collapsed section. Try scrolling to the element or expanding its parent container.`);
   }
 
-  // Check if element is enabled and not obscured (via JS)
-  const finder = elementFinderExpr(uid, selector);
-  const checks = await cdp("Runtime.evaluate", {
-    expression: `(() => {
-      const el = ${finder};
-      if (!el) return { error: "Element not found — the page may have changed. Take a new snapshot with page tool, action: snapshot." };
-      if (el.disabled) return { error: "Element <" + el.tagName.toLowerCase() + "> '" + (el.getAttribute("aria-label") || el.textContent || "").trim().substring(0, 40) + "' is disabled — wait for it to become enabled or check if a prerequisite action is needed." };
-      // Check visibility
-      const s = getComputedStyle(el);
-      if (s.visibility === "hidden" || s.display === "none") return { error: "Element is not visible (display: " + s.display + ", visibility: " + s.visibility + ") — it may be inside a collapsed section or behind a modal. Try dismissing overlays or expanding parent containers." };
-      if (parseFloat(s.opacity) === 0) return { error: "Element has opacity: 0 — it may be hidden or animating in. Wait briefly and retry, or check for overlays." };
-      // Pointer-events check
-      if (s.pointerEvents === "none") return { error: "Element has pointer-events: none — it cannot be clicked. It may be covered by an overlay. Try dismissing modals or interacting with a parent element." };
-      return { ok: true };
-    })()`,
-    returnByValue: true,
-  }, sessionId);
+  // Check actionability via backendNodeId or selector
+  let objectId;
+  if (uid !== undefined && uid !== null) {
+    const map = refMaps.get(sessionId);
+    const backendNodeId = map?.get(uid);
+    if (backendNodeId) {
+      try {
+        const { object } = await cdp("DOM.resolveNode", { backendNodeId }, sessionId);
+        objectId = object?.objectId;
+      } catch {}
+    }
+  }
+  if (!objectId && selector) {
+    const finder = elementFinderExpr(selector);
+    const res = await cdp("Runtime.evaluate", { expression: finder, returnByValue: false }, sessionId);
+    objectId = res.result?.objectId;
+  }
 
-  const v = checks.result?.value;
-  if (v?.error) throw new Error(v.error);
+  if (objectId) {
+    const checks = await cdp("Runtime.callFunctionOn", {
+      functionDeclaration: `function() {
+        if (this.disabled) return { error: "Element <" + this.tagName.toLowerCase() + "> '" + (this.getAttribute("aria-label") || this.textContent || "").trim().substring(0, 40) + "' is disabled — wait for it to become enabled or check if a prerequisite action is needed." };
+        const s = getComputedStyle(this);
+        if (s.visibility === "hidden" || s.display === "none") return { error: "Element is not visible (display: " + s.display + ", visibility: " + s.visibility + ") — it may be inside a collapsed section or behind a modal. Try dismissing overlays or expanding parent containers." };
+        if (parseFloat(s.opacity) === 0) return { error: "Element has opacity: 0 — it may be hidden or animating in. Wait briefly and retry, or check for overlays." };
+        if (s.pointerEvents === "none") return { error: "Element has pointer-events: none — it cannot be clicked. It may be covered by an overlay. Try dismissing modals or interacting with a parent element." };
+        return { ok: true };
+      }`,
+      objectId,
+      returnByValue: true,
+    }, sessionId);
+    const v = checks.result?.value;
+    if (v?.error) throw new Error(v.error);
+  }
+
+  // Hit-test: verify no other element is covering the click target
+  try {
+    await cdp("Runtime.evaluate", {
+      expression: `(() => {
+        const el = document.elementFromPoint(${Math.round(el.x)}, ${Math.round(el.y)});
+        if (!el) return { clear: true };
+        return { tag: el.tagName.toLowerCase(), class: el.className?.toString?.()?.substring(0, 60) || "" };
+      })()`,
+      returnByValue: true,
+    }, sessionId);
+    // We don't block on hit-test mismatch — just provide info
+  } catch {}
 
   return el;
 }
@@ -902,14 +886,27 @@ function modifierFlags(modifiers) {
 
 // ─── Element Resolution (stable backendNodeId refs) ─────────────────
 
-function elementFinderExpr(uid, selector) {
-  if (uid !== undefined && uid !== null) return `document.querySelector('[data-cdp-ref="${uid}"]')`;
-  if (selector) return `document.querySelector(${JSON.stringify(selector)})`;
-  throw new Error("Provide either 'uid' (from snapshot) or 'selector' (CSS).");
+/** Build a JS expression that finds an element by CSS selector, piercing shadow DOM */
+function elementFinderExpr(selector) {
+  if (!selector) throw new Error("Provide a CSS 'selector' or take a snapshot and use 'uid' (ref number).");
+  return `(() => {
+    function deepQuery(root, sel) {
+      const el = root.querySelector(sel);
+      if (el) return el;
+      for (const s of root.querySelectorAll('*')) {
+        if (s.shadowRoot) {
+          const found = deepQuery(s.shadowRoot, sel);
+          if (found) return found;
+        }
+      }
+      return null;
+    }
+    return deepQuery(document, ${JSON.stringify(selector)});
+  })()`;
 }
 
 async function resolveElement(sessionId, uid, selector) {
-  // Try stable backendNodeId resolution first (for uid-based lookups)
+  // Primary path: backendNodeId resolution (works for uid from snapshots)
   if (uid !== undefined && uid !== null) {
     const map = refMaps.get(sessionId);
     const backendNodeId = map?.get(uid);
@@ -937,17 +934,20 @@ async function resolveElement(sessionId, uid, selector) {
           }
         }
       } catch {
-        // backendNodeId stale — fall through to CSS selector fallback
+        // backendNodeId stale — fall through
       }
     }
+    // uid lookup failed — no CSS fallback since we don't set data-cdp-ref anymore
+    throw new Error(`Element ref=${uid} not found — the page may have changed since the last snapshot. Take a new snapshot with page tool, action: snapshot.`);
   }
 
-  // Fallback: CSS selector or data-cdp-ref attribute query
-  const finder = elementFinderExpr(uid, selector);
+  // CSS selector path (with shadow DOM piercing)
+  if (!selector) throw new Error("Provide either 'uid' (from snapshot ref) or 'selector' (CSS).");
+  const finder = elementFinderExpr(selector);
   const result = await cdp("Runtime.evaluate", {
     expression: `(() => {
       const el = ${finder};
-      if (!el) return { error: "Element not found" + ${uid !== undefined ? `" (ref=${uid}). The snapshot may be stale — take a new snapshot."` : JSON.stringify(" (" + (selector || "") + ")")} };
+      if (!el) return { error: "Element not found (" + ${JSON.stringify(selector)} + ")" };
       el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
       const r = el.getBoundingClientRect();
       return {
@@ -968,7 +968,7 @@ async function resolveElement(sessionId, uid, selector) {
 
 /** Resolve uid/selector to a remote JS object ID (for callFunctionOn, etc.) */
 async function resolveElementObjectId(sessionId, uid, selector) {
-  // Try stable backendNodeId resolution first
+  // Primary path: backendNodeId resolution
   if (uid !== undefined && uid !== null) {
     const map = refMaps.get(sessionId);
     const backendNodeId = map?.get(uid);
@@ -984,16 +984,19 @@ async function resolveElementObjectId(sessionId, uid, selector) {
           return object.objectId;
         }
       } catch {
-        // Fall through to CSS selector fallback
+        // backendNodeId stale — fall through
       }
     }
+    throw new Error(`Element ref=${uid} not found — the page may have changed since the last snapshot. Take a new snapshot with page tool, action: snapshot.`);
   }
 
-  const finder = elementFinderExpr(uid, selector);
+  // CSS selector path (with shadow DOM piercing)
+  if (!selector) throw new Error("Provide either 'uid' (from snapshot ref) or 'selector' (CSS).");
+  const finder = elementFinderExpr(selector);
   const result = await cdp("Runtime.evaluate", {
     expression: `(() => {
       const el = ${finder};
-      if (!el) throw new Error("Element not found" + ${uid !== undefined ? `" (ref=${uid}). The page snapshot may be stale — take a new snapshot with page tool, action: snapshot."` : '" — provide a valid CSS selector or take a snapshot first."'});
+      if (!el) throw new Error("Element not found (" + ${JSON.stringify(selector)} + ") — provide a valid CSS selector or take a snapshot first.");
       el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
       return el;
     })()`,
@@ -1611,15 +1614,20 @@ async function handlePageScreenshot(args) {
 async function handlePageContent(args) {
   const sess = await getTabSession(args.tabId);
   const prop = args.format === "html" ? "innerHTML" : "innerText";
-  let expr;
-  if (args.uid !== undefined) {
-    const finder = elementFinderExpr(args.uid);
-    expr = `(() => { const el = ${finder}; if (!el) return "Element not found (ref=${args.uid})"; return el.${prop}; })()`;
-  } else {
-    const sel = args.selector || "body";
-    expr = `(() => { const el = document.querySelector(${JSON.stringify(sel)}); if (!el) return "Element not found: " + ${JSON.stringify(sel)}; return el.${prop}; })()`;
+  if (args.uid !== undefined || args.selector) {
+    const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
+    const result = await cdp("Runtime.callFunctionOn", {
+      functionDeclaration: `function() { return this[${JSON.stringify(prop)}]; }`,
+      objectId,
+      returnByValue: true,
+    }, sess);
+    return ok(result.result.value ?? "(empty)");
   }
-  const result = await cdp("Runtime.evaluate", { expression: expr, returnByValue: true }, sess);
+  // Default: body
+  const result = await cdp("Runtime.evaluate", {
+    expression: `document.body.${prop}`,
+    returnByValue: true,
+  }, sess);
   return ok(result.result.value ?? "(empty)");
 }
 
@@ -1716,10 +1724,49 @@ async function handleInteractClick(args) {
   const el = await checkActionability(sess, args.uid, args.selector);
   const button = args.button || "left";
   const clicks = args.clickCount || 1;
-  const buttonCode = button === "right" ? 2 : button === "middle" ? 1 : 0;
   // CDP buttons bitmask: 1=left, 2=right, 4=middle
   const buttonsMap = { left: 1, right: 2, middle: 4 };
   const buttons = buttonsMap[button] || 1;
+
+  // Resolve objectId for potential JS click fallback (web components / Shadow DOM)
+  let objectId;
+  if (args.uid !== undefined && args.uid !== null) {
+    const map = refMaps.get(sess);
+    const backendNodeId = map?.get(args.uid);
+    if (backendNodeId) {
+      try {
+        const { object } = await cdp("DOM.resolveNode", { backendNodeId }, sess);
+        objectId = object?.objectId;
+      } catch {}
+    }
+  }
+  if (!objectId && args.selector) {
+    try {
+      const finder = elementFinderExpr(args.selector);
+      const res = await cdp("Runtime.evaluate", { expression: finder, returnByValue: false }, sess);
+      objectId = res.result?.objectId;
+    } catch {}
+  }
+
+  // Check pre-click state for popup/toggle elements (aria-expanded, open attribute)
+  let preState = null;
+  if (objectId && button === "left") {
+    try {
+      const check = await cdp("Runtime.callFunctionOn", {
+        functionDeclaration: `function() {
+          return {
+            expanded: this.getAttribute("aria-expanded"),
+            hasPopup: this.hasAttribute("aria-haspopup") || this.hasAttribute("popovertarget"),
+            open: this.hasAttribute("open") || this.closest("details")?.hasAttribute("open"),
+            isWebComponent: !!this.closest("[data-catalyst]") || !!this.getRootNode()?.host || this.tagName.includes("-"),
+          };
+        }`,
+        objectId,
+        returnByValue: true,
+      }, sess);
+      preState = check.result?.value;
+    } catch {}
+  }
 
   const { networkEvents } = await waitForCompletion(sess, async () => {
     await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: el.x, y: el.y }, sess);
@@ -1727,6 +1774,49 @@ async function handleInteractClick(args) {
     await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x: el.x, y: el.y, button, clickCount: clicks, buttons }, sess);
     await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x: el.x, y: el.y, button, clickCount: clicks }, sess);
   });
+
+  // Smart JS click fallback: if the element is a web component or popup trigger
+  // and the CDP mouse events didn't change its state, dispatch element.click() via JS.
+  // This handles GitHub's <action-menu>, Popover API, and custom Web Components
+  // that only listen for the 'click' event rather than raw mousedown/mouseup.
+  if (objectId && button === "left" && preState) {
+    const needsFallback = preState.hasPopup || preState.isWebComponent || preState.expanded === "false";
+    if (needsFallback) {
+      try {
+        await sleep(100); // Let any CDP-triggered handlers settle first
+        const postCheck = await cdp("Runtime.callFunctionOn", {
+          functionDeclaration: `function() {
+            return {
+              expanded: this.getAttribute("aria-expanded"),
+              open: this.hasAttribute("open") || this.closest("details")?.hasAttribute("open"),
+            };
+          }`,
+          objectId,
+          returnByValue: true,
+        }, sess);
+        const postState = postCheck.result?.value;
+        // If state didn't change, dispatch full pointer+mouse event sequence as fallback.
+        // Many modern frameworks (React, GitHub Primer, etc.) listen for PointerEvents,
+        // not just click — so we need to dispatch the complete event chain.
+        const stateChanged = (preState.expanded === "false" && postState?.expanded === "true") ||
+                             (!preState.open && postState?.open);
+        if (!stateChanged) {
+          await cdp("Runtime.callFunctionOn", {
+            functionDeclaration: `function() {
+              const opts = { bubbles: true, cancelable: true, view: window, button: 0 };
+              this.dispatchEvent(new PointerEvent('pointerdown', { ...opts, pointerId: 1 }));
+              this.dispatchEvent(new MouseEvent('mousedown', opts));
+              this.dispatchEvent(new PointerEvent('pointerup', { ...opts, pointerId: 1 }));
+              this.dispatchEvent(new MouseEvent('mouseup', opts));
+              this.dispatchEvent(new MouseEvent('click', opts));
+            }`,
+            objectId,
+          }, sess);
+          await sleep(200); // Let event handlers process
+        }
+      } catch {}
+    }
+  }
 
   let msg = `Clicked <${el.tag}> "${el.label}" at (${Math.round(el.x)}, ${Math.round(el.y)})`;
   if (networkEvents.length) msg += "\n\nNetwork activity:\n" + networkEvents.join("\n");
@@ -1743,18 +1833,19 @@ async function handleInteractHover(args) {
 async function handleInteractType(args) {
   if (!args.text) return fail("Provide 'text' to type.");
   const sess = await getTabSession(args.tabId);
-  const finder = elementFinderExpr(args.uid, args.selector);
+  const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
   const clearCode = args.clear !== false
-    ? `if ('value' in el) {
+    ? `if ('value' in this) {
         const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
                           || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
-        if (nativeSetter) nativeSetter.call(el, '');
-        else el.value = '';
-        el.dispatchEvent(new Event('input', {bubbles:true}));
-      } else if (el.isContentEditable) { el.textContent = ''; }`
+        if (nativeSetter) nativeSetter.call(this, '');
+        else this.value = '';
+        this.dispatchEvent(new Event('input', {bubbles:true}));
+      } else if (this.isContentEditable) { this.textContent = ''; }`
     : "";
-  const focused = await cdp("Runtime.evaluate", {
-    expression: `(() => { const el = ${finder}; if (!el) return {error:"Element not found"}; el.scrollIntoView({block:"center"}); el.focus(); ${clearCode} return {ok:true}; })()`,
+  const focused = await cdp("Runtime.callFunctionOn", {
+    functionDeclaration: `function() { this.scrollIntoView({block:"center"}); this.focus(); ${clearCode} return {ok:true}; }`,
+    objectId,
     returnByValue: true,
   }, sess);
   if (focused.result.value?.error) return fail(focused.result.value.error);
@@ -1799,46 +1890,50 @@ async function handleInteractFill(args) {
 
   const { networkEvents } = await waitForCompletion(sess, async () => {
     for (const field of args.fields) {
-      const finder = elementFinderExpr(field.uid, field.selector);
-      const fieldType = field.type || "text";
-      const code = `(() => {
-        const el = ${finder};
-        if (!el) return { error: "not found" };
-        el.scrollIntoView({ block: "center" });
-        const type = ${JSON.stringify(fieldType)};
-        const val = ${JSON.stringify(field.value)};
-        if (type === "checkbox") {
-          const wanted = val === "true" || val === "1";
-          if (el.checked !== wanted) el.click();
-          return { ok: true, value: String(el.checked) };
-        }
-        if (type === "radio") { el.click(); return { ok: true, value: val }; }
-        if (type === "select") {
-          let opt = Array.from(el.options).find(o => o.value === val || o.textContent.trim() === val);
-          if (!opt) return { error: "Option not found: " + val };
-          const nativeSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
-          if (nativeSetter) nativeSetter.call(el, opt.value);
-          else el.value = opt.value;
-          el.dispatchEvent(new Event('input', {bubbles:true}));
-          el.dispatchEvent(new Event('change', {bubbles:true}));
-          return { ok: true, value: opt.textContent.trim() };
-        }
-        el.focus();
-        // Use nativeInputValueSetter for React/Angular compatibility
-        if ('value' in el) {
-          const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
-                            || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
-          if (nativeSetter) nativeSetter.call(el, val);
-          else el.value = val;
-        } else if (el.isContentEditable) {
-          el.textContent = val;
-        }
-        el.dispatchEvent(new Event('input', {bubbles:true}));
-        el.dispatchEvent(new Event('change', {bubbles:true}));
-        return { ok: true, value: val.substring(0, 40) };
-      })()`;
-      const r = await cdp("Runtime.evaluate", { expression: code, returnByValue: true }, sess);
-      results.push({ field: field.uid ?? field.selector, ...(r.result.value || { error: "eval failed" }) });
+      try {
+        const objectId = await resolveElementObjectId(sess, field.uid, field.selector);
+        const fieldType = field.type || "text";
+        const r = await cdp("Runtime.callFunctionOn", {
+          functionDeclaration: `function() {
+            this.scrollIntoView({ block: "center" });
+            const type = ${JSON.stringify(fieldType)};
+            const val = ${JSON.stringify(field.value)};
+            if (type === "checkbox") {
+              const wanted = val === "true" || val === "1";
+              if (this.checked !== wanted) this.click();
+              return { ok: true, value: String(this.checked) };
+            }
+            if (type === "radio") { this.click(); return { ok: true, value: val }; }
+            if (type === "select") {
+              let opt = Array.from(this.options).find(o => o.value === val || o.textContent.trim() === val);
+              if (!opt) return { error: "Option not found: " + val };
+              const nativeSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+              if (nativeSetter) nativeSetter.call(this, opt.value);
+              else this.value = opt.value;
+              this.dispatchEvent(new Event('input', {bubbles:true}));
+              this.dispatchEvent(new Event('change', {bubbles:true}));
+              return { ok: true, value: opt.textContent.trim() };
+            }
+            this.focus();
+            if ('value' in this) {
+              const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+                                || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+              if (nativeSetter) nativeSetter.call(this, val);
+              else this.value = val;
+            } else if (this.isContentEditable) {
+              this.textContent = val;
+            }
+            this.dispatchEvent(new Event('input', {bubbles:true}));
+            this.dispatchEvent(new Event('change', {bubbles:true}));
+            return { ok: true, value: val.substring(0, 40) };
+          }`,
+          objectId,
+          returnByValue: true,
+        }, sess);
+        results.push({ field: field.uid ?? field.selector, ...(r.result.value || { error: "eval failed" }) });
+      } catch (e) {
+        results.push({ field: field.uid ?? field.selector, error: e.message });
+      }
     }
   });
 
@@ -1850,26 +1945,24 @@ async function handleInteractFill(args) {
 async function handleInteractSelect(args) {
   if (!args.value) return fail("Provide 'value' to select.");
   const sess = await getTabSession(args.tabId);
-  const finder = elementFinderExpr(args.uid, args.selector);
+  const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
 
   const { networkEvents } = await waitForCompletion(sess, async () => {
-    const result = await cdp("Runtime.evaluate", {
-      expression: `(() => {
-        const sel = ${finder};
-        if (!sel) return { error: "Element not found" };
+    const result = await cdp("Runtime.callFunctionOn", {
+      functionDeclaration: `function() {
+        const sel = this;
 
         // Native <select> handling with proper event sequence
         if (sel.tagName === "SELECT") {
-          let opt = Array.from(sel.options).find(o => o.value === ${JSON.stringify(args.value)});
-          if (!opt) opt = Array.from(sel.options).find(o => o.textContent.trim() === ${JSON.stringify(args.value)});
-          if (!opt) return { error: "Option not found: " + ${JSON.stringify(args.value)} + ". Available: " + Array.from(sel.options).map(o => o.textContent.trim()).join(", ") };
+          const targetVal = ${JSON.stringify(args.value)};
+          let opt = Array.from(sel.options).find(o => o.value === targetVal);
+          if (!opt) opt = Array.from(sel.options).find(o => o.textContent.trim() === targetVal);
+          if (!opt) return { error: "Option not found: " + targetVal + ". Available: " + Array.from(sel.options).map(o => o.textContent.trim()).join(", ") };
 
-          // Use nativeInputValueSetter for React compatibility
           const nativeSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
           if (nativeSetter) nativeSetter.call(sel, opt.value);
           else sel.value = opt.value;
 
-          // Dispatch full event sequence for framework compatibility
           sel.dispatchEvent(new Event("input", { bubbles: true }));
           sel.dispatchEvent(new Event("change", { bubbles: true }));
           return { selected: opt.textContent.trim(), value: opt.value };
@@ -1882,14 +1975,14 @@ async function handleInteractSelect(args) {
           sel.classList.toString().match(/MuiSelect|ant-select|react-select|Select/i);
 
         if (isCustomDropdown) {
-          // Click to open the dropdown
           sel.scrollIntoView({ block: "center" });
           sel.click();
           return { customDropdown: true, message: "Custom dropdown opened — click the matching option" };
         }
 
         return { error: "Not a <select> element and not a recognized custom dropdown. Element: <" + sel.tagName.toLowerCase() + ">" };
-      })()`,
+      }`,
+      objectId,
       returnByValue: true,
     }, sess);
     const v = result.result.value;
@@ -1982,9 +2075,10 @@ async function handleInteractScroll(args) {
     const scrollX = args.x ?? 0;
     const scrollY = args.y ?? 0;
     if (args.uid !== undefined || args.selector) {
-      const finder = elementFinderExpr(args.uid, args.selector);
-      await cdp("Runtime.evaluate", {
-        expression: `(() => { const el = ${finder}; if(el) el.scrollTo({left:${scrollX},top:${scrollY},behavior:'smooth'}); })()`,
+      const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
+      await cdp("Runtime.callFunctionOn", {
+        functionDeclaration: `function() { this.scrollTo({left:${scrollX},top:${scrollY},behavior:'smooth'}); }`,
+        objectId,
         returnByValue: true,
       }, sess);
     } else {
@@ -2007,9 +2101,10 @@ async function handleInteractScroll(args) {
   }
 
   if (args.uid !== undefined || args.selector) {
-    const finder = elementFinderExpr(args.uid, args.selector);
-    await cdp("Runtime.evaluate", {
-      expression: `(() => { const el = ${finder}; if(el) el.scrollBy({left:${deltaX},top:${deltaY},behavior:'smooth'}); })()`,
+    const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
+    await cdp("Runtime.callFunctionOn", {
+      functionDeclaration: `function() { this.scrollBy({left:${deltaX},top:${deltaY},behavior:'smooth'}); }`,
+      objectId,
       returnByValue: true,
     }, sess);
   } else {
@@ -2025,28 +2120,11 @@ async function handleInteractUpload(args) {
   if (!args.files?.length) return fail("Provide 'files' array with absolute file paths.");
   const sess = await getTabSession(args.tabId);
 
-  // Resolve element to get backendNodeId
-  const finder = elementFinderExpr(args.uid, args.selector);
-  const evalResult = await cdp("Runtime.evaluate", {
-    expression: `(() => {
-      const el = ${finder};
-      if (!el) return { error: "Element not found" };
-      el.scrollIntoView({ block: "center" });
-      return { tag: el.tagName.toLowerCase(), type: el.type || "" };
-    })()`,
-    returnByValue: true,
-  }, sess);
-  if (evalResult.result.value?.error) return fail(evalResult.result.value.error);
+  // Resolve element via resolveElementObjectId
+  const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
 
-  // Get objectId for the element
-  const objResult = await cdp("Runtime.evaluate", {
-    expression: finder,
-    returnByValue: false,
-  }, sess);
-  if (!objResult.result.objectId) return fail("Could not resolve element for file upload.");
-
-  // Describe node to get backendNodeId
-  const { node } = await cdp("DOM.describeNode", { objectId: objResult.result.objectId }, sess);
+  // Describe node to get backendNodeId for setFileInputFiles
+  const { node } = await cdp("DOM.describeNode", { objectId }, sess);
   await cdp("DOM.setFileInputFiles", { files: args.files, backendNodeId: node.backendNodeId }, sess);
 
   return ok(`Uploaded ${args.files.length} file(s): ${args.files.map(f => f.split(/[/\\]/).pop()).join(", ")}`);
@@ -2054,15 +2132,14 @@ async function handleInteractUpload(args) {
 
 async function handleInteractFocus(args) {
   const sess = await getTabSession(args.tabId);
-  const finder = elementFinderExpr(args.uid, args.selector);
-  const result = await cdp("Runtime.evaluate", {
-    expression: `(() => {
-      const el = ${finder};
-      if (!el) return { error: "Element not found" };
-      el.scrollIntoView({ block: "center" });
-      el.focus();
-      return { tag: el.tagName.toLowerCase(), label: (el.getAttribute("aria-label") || el.textContent || "").trim().substring(0, 60) };
-    })()`,
+  const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
+  const result = await cdp("Runtime.callFunctionOn", {
+    functionDeclaration: `function() {
+      this.scrollIntoView({ block: "center" });
+      this.focus();
+      return { tag: this.tagName.toLowerCase(), label: (this.getAttribute("aria-label") || this.textContent || "").trim().substring(0, 60) };
+    }`,
+    objectId,
     returnByValue: true,
   }, sess);
   const v = result.result.value;
@@ -2073,21 +2150,20 @@ async function handleInteractFocus(args) {
 async function handleInteractCheck(args) {
   if (args.checked === undefined) return fail("Provide 'checked' (true/false).");
   const sess = await getTabSession(args.tabId);
-  const finder = elementFinderExpr(args.uid, args.selector);
+  const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
 
   const { networkEvents } = await waitForCompletion(sess, async () => {
-    const result = await cdp("Runtime.evaluate", {
-      expression: `(() => {
-        const el = ${finder};
-        if (!el) return { error: "Element not found" };
-        el.scrollIntoView({ block: "center" });
+    const result = await cdp("Runtime.callFunctionOn", {
+      functionDeclaration: `function() {
+        this.scrollIntoView({ block: "center" });
         const desired = ${args.checked === true};
-        if (el.checked !== desired) {
-          el.click();
-          el.dispatchEvent(new Event('change', { bubbles: true }));
+        if (this.checked !== desired) {
+          this.click();
+          this.dispatchEvent(new Event('change', { bubbles: true }));
         }
-        return { checked: el.checked, label: (el.getAttribute("aria-label") || el.labels?.[0]?.textContent || "").trim().substring(0, 60) };
-      })()`,
+        return { checked: this.checked, label: (this.getAttribute("aria-label") || this.labels?.[0]?.textContent || "").trim().substring(0, 60) };
+      }`,
+      objectId,
       returnByValue: true,
     }, sess);
     const v = result.result.value;
