@@ -1,27 +1,31 @@
 #!/usr/bin/env node
 
 /**
- * CDP Browser Automation — MCP Server  v3.0
+ * CDP Browser Automation — MCP Server  v4.0
  *
  * 9 consolidated tools with ~50 sub-actions for full browser automation.
+ * v4 upgrades: stable element refs (backendNodeId), auto-waiting, incremental snapshots,
+ * per-agent session isolation, framework-aware inputs, modal guards, rich tool descriptions,
+ * auto-console-error reporting, connection health monitoring, download tracking.
  *
  * Tools:
  *   tabs      — Tab lifecycle (list, find, new, close, activate, info)
  *   page      — Navigation, snapshot, screenshot, content, wait, PDF, dialog, inject, CSP bypass
  *   interact  — Click, hover, type, fill, select, press, drag, scroll, upload, focus, check
  *   execute   — JS eval, script, call-on-element
- *   observe   — Console, network, request body, performance metrics
+ *   observe   — Console, network, request body, performance metrics, downloads
  *   emulate   — Viewport, color, UA, geo, CPU, timezone, locale, vision, network, SSL, etc.
  *   storage   — Cookies, localStorage, indexedDB, cache, quota
  *   intercept — HTTP request interception, mocking, blocking via Fetch domain
- *   cleanup   — Disconnect sessions, clean temp files, status
+ *   cleanup   — Disconnect sessions, clean temp files, status, list_sessions
  *
  * Setup:  chrome://flags/#enable-remote-debugging → Enabled → Relaunch
  *
  * Env vars:
- *   CDP_PORT     Chrome debugging port    (default: 9222)
- *   CDP_HOST     Chrome debugging host    (default: 127.0.0.1)
- *   CDP_TIMEOUT  Command timeout in ms    (default: 30000)
+ *   CDP_PORT          Chrome debugging port        (default: 9222)
+ *   CDP_HOST          Chrome debugging host        (default: 127.0.0.1)
+ *   CDP_TIMEOUT       Command timeout in ms        (default: 30000)
+ *   CDP_SESSION_TTL   Agent session TTL in ms      (default: 300000)
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -40,6 +44,7 @@ import { tmpdir } from "os";
 const CDP_HOST = process.env.CDP_HOST || "127.0.0.1";
 const CDP_PORT = process.env.CDP_PORT || "9222";
 const CDP_TIMEOUT = parseInt(process.env.CDP_TIMEOUT || "30000");
+const SESSION_TTL = parseInt(process.env.CDP_SESSION_TTL) || 300000;
 const LONG_TIMEOUT = 120_000;
 const MAX_INLINE_LEN = 60_000;
 const TEMP_DIR = join(tmpdir(), ".cdp-mcp");
@@ -83,8 +88,18 @@ const pendingDialogs = new Map();       // sessionId → [ {type, message, defau
 const pendingFetchRequests = new Map(); // sessionId → Map(requestId → requestInfo)
 const fetchRules = new Map();           // sessionId → [ { pattern, action, response } ]
 const injectedScripts = new Map();      // sessionId → [ { identifier, description } ]
+const refMaps = new Map();              // sessionId → Map<uid, backendNodeId>
+const lastSnapshots = new Map();        // sessionId → { snapshot, url, title }
+const agentSessions = new Map();        // agentSessionId → { lastActivity, tabIds: Set<tabId> }
+
+const downloads = new Map();              // sessionId → [{guid, url, suggestedFilename, state, receivedBytes, totalBytes}]
 
 const NO_ENABLE = new Set(["Input", "Target", "Browser", "Accessibility", "DOM", "Emulation", "Storage"]);
+
+// ─── Connection Health ──────────────────────────────────────────────
+
+let connectionHealth = { status: "disconnected", lastPing: null, lastPong: null, failures: 0 };
+let healthCheckTimer = null;
 
 // ─── Network Throttle Presets ───────────────────────────────────────
 
@@ -121,7 +136,7 @@ function connectBrowser() {
   return new Promise((resolve, reject) => {
     const wsUrl = getWsUrl();
     browserWs = new WebSocket(wsUrl, { perMessageDeflate: false });
-    browserWs.once("open", resolve);
+    browserWs.once("open", () => { startHealthCheck(); resolve(); });
     browserWs.once("error", () =>
       reject(new Error(
         "Cannot connect to Chrome. Enable remote debugging: " +
@@ -154,9 +169,48 @@ function connectBrowser() {
       pendingFetchRequests.clear();
       fetchRules.clear();
       injectedScripts.clear();
+      refMaps.clear();
+      lastSnapshots.clear();
+      downloads.clear();
       browserWs = null;
+      stopHealthCheck();
     });
   });
+}
+
+// ─── Connection Health Check ────────────────────────────────────────
+
+function startHealthCheck() {
+  stopHealthCheck();
+  connectionHealth = { status: "connected", lastPing: null, lastPong: null, failures: 0 };
+  healthCheckTimer = setInterval(() => {
+    if (!browserWs || browserWs.readyState !== WebSocket.OPEN) {
+      connectionHealth.status = "disconnected";
+      return;
+    }
+    connectionHealth.lastPing = Date.now();
+    let pongReceived = false;
+    const pongHandler = () => { pongReceived = true; connectionHealth.lastPong = Date.now(); connectionHealth.failures = 0; connectionHealth.status = "connected"; };
+    browserWs.once("pong", pongHandler);
+    try { browserWs.ping(); } catch { connectionHealth.status = "error"; return; }
+    setTimeout(() => {
+      if (!pongReceived) {
+        connectionHealth.failures++;
+        connectionHealth.status = "unhealthy";
+        browserWs.removeListener("pong", pongHandler);
+        if (connectionHealth.failures >= 2) {
+          connectionHealth.status = "dead";
+          try { browserWs.terminate(); } catch { /* ok */ }
+          browserWs = null;
+        }
+      }
+    }, 5000);
+  }, 30000);
+}
+
+function stopHealthCheck() {
+  if (healthCheckTimer) { clearInterval(healthCheckTimer); healthCheckTimer = null; }
+  connectionHealth.status = "disconnected";
 }
 
 // ─── CDP Event Handler ──────────────────────────────────────────────
@@ -243,6 +297,33 @@ function handleEvent(sessionId, method, params) {
         } catch { /* already handled */ }
       }
     }, 10000);
+  }
+
+  // ── Download tracking ──
+  if (method === "Page.downloadWillBegin") {
+    const dl = downloads.get(sessionId) || [];
+    dl.push({
+      guid: params.guid,
+      url: params.url,
+      suggestedFilename: params.suggestedFilename || "unknown",
+      state: "inProgress",
+      receivedBytes: 0,
+      totalBytes: 0,
+      ts: Date.now(),
+    });
+    if (dl.length > 100) dl.splice(0, dl.length - 100);
+    downloads.set(sessionId, dl);
+  }
+  if (method === "Page.downloadProgress") {
+    const dl = downloads.get(sessionId);
+    if (dl) {
+      const entry = dl.find(d => d.guid === params.guid);
+      if (entry) {
+        entry.receivedBytes = params.receivedBytes || 0;
+        entry.totalBytes = params.totalBytes || 0;
+        entry.state = params.state || entry.state; // inProgress, completed, canceled
+      }
+    }
   }
 
   // ── Fetch interception (v3) ──
@@ -399,6 +480,9 @@ async function detachTab(tabId) {
   pendingFetchRequests.delete(sid);
   fetchRules.delete(sid);
   injectedScripts.delete(sid);
+  refMaps.delete(sid);
+  lastSnapshots.delete(sid);
+  downloads.delete(sid);
 }
 
 // ─── Tab Listing ────────────────────────────────────────────────────
@@ -411,11 +495,37 @@ async function getTabs() {
 
 // ─── Accessibility Tree / Snapshot ──────────────────────────────────
 
+// Walk CDP DOM tree to collect data-cdp-ref → backendNodeId mappings
+function collectRefsFromDOMTree(node, result = new Map()) {
+  if (node.attributes) {
+    // CDP attributes is a flat array: [name1, value1, name2, value2, ...]
+    for (let i = 0; i < node.attributes.length; i += 2) {
+      if (node.attributes[i] === "data-cdp-ref") {
+        result.set(parseInt(node.attributes[i + 1], 10), node.backendNodeId);
+        break;
+      }
+    }
+  }
+  if (node.children) {
+    for (const child of node.children) collectRefsFromDOMTree(child, result);
+  }
+  if (node.shadowRoots) {
+    for (const root of node.shadowRoots) collectRefsFromDOMTree(root, result);
+  }
+  if (node.contentDocument) {
+    collectRefsFromDOMTree(node.contentDocument, result);
+  }
+  return result;
+}
+
 async function buildSnapshot(sessionId) {
   const result = await cdp("Runtime.evaluate", {
     expression: `(() => {
   const INTERACTIVE = new Set(["a","button","input","select","textarea","details","summary","option"]);
   const SKIP_TAGS = new Set(["script","style","noscript","template","path","br","wbr","meta","link"]);
+
+  // Remove old ref markers first
+  document.querySelectorAll("[data-cdp-ref]").forEach(el => el.removeAttribute("data-cdp-ref"));
 
   let uidCounter = 0;
 
@@ -547,11 +657,12 @@ async function buildSnapshot(sessionId) {
 
     if (role) {
       id = uidCounter++;
+      el.setAttribute("data-cdp-ref", String(id));
       const name = getName(el);
       const props = getProps(el);
       const propStr = props.length ? " [" + props.join(", ") + "]" : "";
       const nameStr = name ? ' "' + name.replace(/[\\\\\\n\\r"]/g, " ").trim().substring(0, 100) + '"' : "";
-      output += indent + "- " + role + nameStr + propStr + " [uid=" + id + "]\\n";
+      output += indent + "- " + role + nameStr + propStr + " [ref=" + id + "]\\n";
     }
 
     const children = el.children;
@@ -580,81 +691,19 @@ async function buildSnapshot(sessionId) {
   if (result.exceptionDetails) {
     throw new Error(result.exceptionDetails.exception?.description || "Snapshot failed");
   }
+
+  // Collect stable backendNodeId refs via CDP DOM tree
+  try {
+    await ensureDomain(sessionId, "DOM");
+    const { root } = await cdp("DOM.getDocument", { depth: -1, pierce: true }, sessionId);
+    const refs = collectRefsFromDOMTree(root);
+    refMaps.set(sessionId, refs);
+  } catch (e) {
+    // Fallback: snapshot still works, but ref resolution will fall back to CSS query
+    refMaps.set(sessionId, new Map());
+  }
+
   return result.result.value;
-}
-
-// ─── UID Resolver ───────────────────────────────────────────────────
-
-function uidResolver(uid) {
-  return `(() => {
-  const SKIP = new Set(["script","style","noscript","template","path","br","wbr","meta","link"]);
-  let counter = 0;
-  function getRole(el) {
-    const explicit = el.getAttribute && el.getAttribute("role");
-    if (explicit) return explicit;
-    const tag = el.tagName.toLowerCase();
-    if (tag === "a" && el.href) return "link";
-    if (tag === "button" || (tag === "input" && el.type === "submit") || (tag === "input" && el.type === "button")) return "button";
-    if (tag === "input") { const t = (el.type||"text").toLowerCase(); if(t==="hidden")return null; return "textbox"; }
-    if (tag === "textarea") return "textbox";
-    if (tag === "select") return "combobox";
-    if (tag === "option") return "option";
-    if (tag === "img" || tag === "svg") return "img";
-    if (tag === "video") return "video";
-    if (tag === "audio") return "audio";
-    if (tag === "nav") return "navigation";
-    if (tag === "main") return "main";
-    if (tag === "header") return "banner";
-    if (tag === "footer") return "contentinfo";
-    if (tag === "aside") return "complementary";
-    if (tag === "form") return "form";
-    if (tag === "table") return "table";
-    if (tag === "thead" || tag === "tbody" || tag === "tfoot") return "rowgroup";
-    if (tag === "tr") return "row";
-    if (tag === "td") return "cell";
-    if (tag === "th") return "columnheader";
-    if (tag === "ul" || tag === "ol") return "list";
-    if (tag === "li") return "listitem";
-    if (tag === "section") return el.getAttribute("aria-label") ? "region" : null;
-    if (tag === "dialog") return "dialog";
-    if (tag.match(/^h[1-6]$/)) return "heading";
-    if (tag === "label") return "label";
-    if (tag === "fieldset") return "group";
-    if (tag === "legend") return "legend";
-    if (tag === "progress") return "progressbar";
-    if (tag === "meter") return "meter";
-    if (tag === "output") return "status";
-    if (tag === "iframe") return "document";
-    if (el.getAttribute("tabindex") !== null) return "generic";
-    if (el.getAttribute("onclick") || el.getAttribute("data-action")) return "generic";
-    return null;
-  }
-  function isVis(el) {
-    if (!el.offsetParent && getComputedStyle(el).position !== "fixed" &&
-        getComputedStyle(el).position !== "sticky" && el.tagName.toLowerCase() !== "body") return false;
-    const s = getComputedStyle(el);
-    if (s.display === "none" || s.visibility === "hidden") return false;
-    return true;
-  }
-  function walk(el, depth) {
-    if (!el || !el.tagName) return null;
-    const tag = el.tagName.toLowerCase();
-    if (SKIP.has(tag)) return null;
-    if (!isVis(el)) return null;
-    if (depth > 20) return null;
-    const role = getRole(el);
-    if (role) {
-      if (counter === ${uid}) return el;
-      counter++;
-    }
-    for (const child of el.children) {
-      const r = walk(child, role ? depth + 1 : depth);
-      if (r) return r;
-    }
-    return null;
-  }
-  return walk(document.body, 0);
-})()`;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────
@@ -676,6 +725,128 @@ function fail(msg) {
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
+}
+
+// ─── Auto-Waiting (Playwright-inspired) ─────────────────────────────
+
+/**
+ * Wraps an action callback and waits for triggered network activity to settle.
+ * Detects XHR/fetch/navigation requests fired by the action and waits for them to complete.
+ * @param {string} sessionId - CDP session ID
+ * @param {Function} actionFn - async function performing the action
+ * @param {object} [opts] - options: { timeout: 5000 }
+ * @returns {Promise<{result: any, networkEvents: string[]}>} action result + network events
+ */
+async function waitForCompletion(sessionId, actionFn, opts = {}) {
+  const timeout = opts.timeout || 5000;
+  const pendingRequests = new Map(); // requestId → { url, method, type, ts }
+  const completedEvents = [];
+  let navigationDetected = false;
+
+  // Ensure network monitoring is active
+  await enableMonitoring(sessionId, "network");
+
+  // Snapshot current network request count to detect new ones
+  const reqMap = networkReqs.get(sessionId) || new Map();
+  const prevRequestIds = new Set(reqMap.keys());
+
+  // Execute the action
+  const result = await actionFn();
+
+  // Wait a brief moment for triggered requests to start
+  await sleep(150);
+
+  // Collect new requests that appeared since the action
+  const currentReqMap = networkReqs.get(sessionId) || new Map();
+  for (const [reqId, req] of currentReqMap) {
+    if (!prevRequestIds.has(reqId) && !req.status) {
+      pendingRequests.set(reqId, req);
+      if ((req.type || "").toLowerCase() === "document") {
+        navigationDetected = true;
+      }
+    }
+  }
+
+  // If navigation detected, wait for page load (up to 10s)
+  if (navigationDetected) {
+    const navTimeout = Math.min(timeout * 2, 10000);
+    const start = Date.now();
+    while (Date.now() - start < navTimeout) {
+      try {
+        const r = await cdp("Runtime.evaluate", {
+          expression: "document.readyState",
+          returnByValue: true,
+        }, sessionId, 3000);
+        if (r.result.value === "complete") break;
+      } catch { /* page transitioning */ }
+      await sleep(300);
+    }
+    completedEvents.push("[NAV] Page navigation detected and loaded");
+  }
+
+  // Wait for pending XHR/fetch requests to complete (up to timeout)
+  if (pendingRequests.size > 0) {
+    const start = Date.now();
+    while (Date.now() - start < timeout && pendingRequests.size > 0) {
+      const updatedMap = networkReqs.get(sessionId) || new Map();
+      for (const [reqId, req] of pendingRequests) {
+        const updated = updatedMap.get(reqId);
+        if (updated?.status) {
+          completedEvents.push(`[${(updated.type || "XHR").toUpperCase()}] ${updated.method} ${updated.url.substring(0, 80)} → ${updated.status}`);
+          pendingRequests.delete(reqId);
+        }
+      }
+      if (pendingRequests.size > 0) await sleep(100);
+    }
+
+    // Report timed-out requests
+    for (const [, req] of pendingRequests) {
+      completedEvents.push(`[PENDING] ${req.method} ${req.url.substring(0, 80)} (still loading)`);
+    }
+  }
+
+  // Extra settling pause if any network activity occurred
+  if (completedEvents.length > 0) {
+    await sleep(200);
+  }
+
+  return { result, networkEvents: completedEvents };
+}
+
+/**
+ * Check element actionability: visible, enabled, stable position, non-zero size.
+ * Returns the element info or throws a descriptive error.
+ */
+async function checkActionability(sessionId, uid, selector) {
+  const el = await resolveElement(sessionId, uid, selector);
+
+  // Check non-zero size
+  if (el.w <= 0 || el.h <= 0) {
+    throw new Error(`Element <${el.tag}> "${el.label}" has zero size (${el.w}x${el.h}) — it may be hidden or inside a collapsed section. Try scrolling to the element or expanding its parent container.`);
+  }
+
+  // Check if element is enabled and not obscured (via JS)
+  const finder = elementFinderExpr(uid, selector);
+  const checks = await cdp("Runtime.evaluate", {
+    expression: `(() => {
+      const el = ${finder};
+      if (!el) return { error: "Element not found — the page may have changed. Take a new snapshot with page tool, action: snapshot." };
+      if (el.disabled) return { error: "Element <" + el.tagName.toLowerCase() + "> '" + (el.getAttribute("aria-label") || el.textContent || "").trim().substring(0, 40) + "' is disabled — wait for it to become enabled or check if a prerequisite action is needed." };
+      // Check visibility
+      const s = getComputedStyle(el);
+      if (s.visibility === "hidden" || s.display === "none") return { error: "Element is not visible (display: " + s.display + ", visibility: " + s.visibility + ") — it may be inside a collapsed section or behind a modal. Try dismissing overlays or expanding parent containers." };
+      if (parseFloat(s.opacity) === 0) return { error: "Element has opacity: 0 — it may be hidden or animating in. Wait briefly and retry, or check for overlays." };
+      // Pointer-events check
+      if (s.pointerEvents === "none") return { error: "Element has pointer-events: none — it cannot be clicked. It may be covered by an overlay. Try dismissing modals or interacting with a parent element." };
+      return { ok: true };
+    })()`,
+    returnByValue: true,
+  }, sessionId);
+
+  const v = checks.result?.value;
+  if (v?.error) throw new Error(v.error);
+
+  return el;
 }
 
 // ─── Key Mapping ────────────────────────────────────────────────────
@@ -729,20 +900,54 @@ function modifierFlags(modifiers) {
   return flags;
 }
 
-// ─── Element Resolution ─────────────────────────────────────────────
+// ─── Element Resolution (stable backendNodeId refs) ─────────────────
 
 function elementFinderExpr(uid, selector) {
-  if (uid !== undefined && uid !== null) return uidResolver(uid);
+  if (uid !== undefined && uid !== null) return `document.querySelector('[data-cdp-ref="${uid}"]')`;
   if (selector) return `document.querySelector(${JSON.stringify(selector)})`;
   throw new Error("Provide either 'uid' (from snapshot) or 'selector' (CSS).");
 }
 
 async function resolveElement(sessionId, uid, selector) {
+  // Try stable backendNodeId resolution first (for uid-based lookups)
+  if (uid !== undefined && uid !== null) {
+    const map = refMaps.get(sessionId);
+    const backendNodeId = map?.get(uid);
+    if (backendNodeId) {
+      try {
+        const { object } = await cdp("DOM.resolveNode", { backendNodeId }, sessionId);
+        if (object?.objectId) {
+          const result = await cdp("Runtime.callFunctionOn", {
+            functionDeclaration: `function() {
+              this.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+              const r = this.getBoundingClientRect();
+              return {
+                x: r.x + r.width / 2,
+                y: r.y + r.height / 2,
+                tag: this.tagName.toLowerCase(),
+                label: (this.getAttribute("aria-label") || this.textContent || "").trim().substring(0, 60),
+                w: r.width, h: r.height,
+              };
+            }`,
+            objectId: object.objectId,
+            returnByValue: true,
+          }, sessionId);
+          if (!result.exceptionDetails && result.result.value) {
+            return result.result.value;
+          }
+        }
+      } catch {
+        // backendNodeId stale — fall through to CSS selector fallback
+      }
+    }
+  }
+
+  // Fallback: CSS selector or data-cdp-ref attribute query
   const finder = elementFinderExpr(uid, selector);
   const result = await cdp("Runtime.evaluate", {
     expression: `(() => {
       const el = ${finder};
-      if (!el) return { error: "Element not found" + ${uid !== undefined ? `" (uid=${uid})"` : JSON.stringify(" (" + (selector || "") + ")")} };
+      if (!el) return { error: "Element not found" + ${uid !== undefined ? `" (ref=${uid}). The snapshot may be stale — take a new snapshot."` : JSON.stringify(" (" + (selector || "") + ")")} };
       el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
       const r = el.getBoundingClientRect();
       return {
@@ -755,7 +960,7 @@ async function resolveElement(sessionId, uid, selector) {
     })()`,
     returnByValue: true,
   }, sessionId);
-  if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || "Element resolution failed");
+  if (result.exceptionDetails) throw new Error((result.exceptionDetails.exception?.description || "Element resolution failed") + " — take a new snapshot with page tool, action: snapshot.");
   const v = result.result.value;
   if (v?.error) throw new Error(v.error);
   return v;
@@ -763,17 +968,38 @@ async function resolveElement(sessionId, uid, selector) {
 
 /** Resolve uid/selector to a remote JS object ID (for callFunctionOn, etc.) */
 async function resolveElementObjectId(sessionId, uid, selector) {
+  // Try stable backendNodeId resolution first
+  if (uid !== undefined && uid !== null) {
+    const map = refMaps.get(sessionId);
+    const backendNodeId = map?.get(uid);
+    if (backendNodeId) {
+      try {
+        const { object } = await cdp("DOM.resolveNode", { backendNodeId }, sessionId);
+        if (object?.objectId) {
+          // Scroll into view
+          await cdp("Runtime.callFunctionOn", {
+            functionDeclaration: `function() { this.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }); }`,
+            objectId: object.objectId,
+          }, sessionId);
+          return object.objectId;
+        }
+      } catch {
+        // Fall through to CSS selector fallback
+      }
+    }
+  }
+
   const finder = elementFinderExpr(uid, selector);
   const result = await cdp("Runtime.evaluate", {
     expression: `(() => {
       const el = ${finder};
-      if (!el) throw new Error("Element not found");
+      if (!el) throw new Error("Element not found" + ${uid !== undefined ? `" (ref=${uid}). The page snapshot may be stale — take a new snapshot with page tool, action: snapshot."` : '" — provide a valid CSS selector or take a snapshot first."'});
       el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
       return el;
     })()`,
     returnByValue: false,
   }, sessionId);
-  if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || "Element resolution failed");
+  if (result.exceptionDetails) throw new Error((result.exceptionDetails.exception?.description || "Element resolution failed") + " — take a new snapshot with page tool, action: snapshot.");
   return result.result.objectId;
 }
 
@@ -783,7 +1009,23 @@ const TOOLS = [
   // ── 1. tabs ──
   {
     name: "tabs",
-    description: "Manage browser tabs. Actions: list, find, new, close, activate, info.",
+    description: [
+      "Manage browser tabs: list, search, create, close, activate, and inspect tabs.",
+      "",
+      "Operations:",
+      "- list: List all open browser tabs with their IDs, URLs, and titles",
+      "- find: Search tabs by title or URL substring (requires: query)",
+      "- new: Open a new tab (optional: url — defaults to about:blank)",
+      "- close: Close a specific tab (requires: tabId)",
+      "- activate: Bring a tab to the foreground (requires: tabId)",
+      "- info: Get detailed info about a tab including URL, title, and connection status (requires: tabId)",
+    ].join("\n"),
+    annotations: {
+      title: "Browser Tabs",
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -799,7 +1041,34 @@ const TOOLS = [
   // ── 2. page ──
   {
     name: "page",
-    description: "Page-level operations: navigation, snapshot, screenshot, content, wait, PDF export, dialog handling, script injection, CSP bypass. Actions: goto, back, forward, reload, snapshot, screenshot, content, wait, pdf, dialog, inject, bypass_csp.",
+    description: [
+      "Page-level operations: navigation, accessibility snapshots, screenshots, content extraction, waiting, PDF export, dialog handling, script injection, and CSP bypass.",
+      "",
+      "Operations:",
+      "- goto: Navigate to a URL and wait for page load (requires: tabId, url)",
+      "- back: Navigate back in browser history (requires: tabId)",
+      "- forward: Navigate forward in browser history (requires: tabId)",
+      "- reload: Reload the current page (requires: tabId; optional: ignoreCache)",
+      "- snapshot: Capture accessibility tree snapshot with element refs for interaction (requires: tabId)",
+      "- screenshot: Take a screenshot of the page or a specific element (requires: tabId; optional: fullPage, quality, uid)",
+      "- content: Extract text or HTML content from the page or an element (requires: tabId; optional: uid, selector, format[text|html])",
+      "- wait: Wait for text to appear/disappear, a CSS selector to match, or a fixed time (requires: tabId; provide one of: text, textGone, selector, or time; optional: timeout)",
+      "- pdf: Export page as PDF to temp file (requires: tabId; optional: landscape, scale, paperWidth, paperHeight, margin{top,bottom,left,right})",
+      "- dialog: Handle a pending JavaScript dialog (alert/confirm/prompt) (requires: tabId; optional: accept[default:true], text for prompt response)",
+      "- inject: Inject a script that runs on every new document load (requires: tabId, script)",
+      "- bypass_csp: Enable/disable Content Security Policy bypass (requires: tabId; optional: enabled[default:true])",
+      "",
+      "Notes:",
+      "- Always take a snapshot before interacting with elements — it provides uid refs needed by interact tools",
+      "- The snapshot returns an accessibility tree with roles, names, and properties matching ARIA semantics",
+      "- Wait actions poll every 300ms up to the timeout (default: 10000ms)",
+    ].join("\n"),
+    annotations: {
+      title: "Page Operations",
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -832,7 +1101,32 @@ const TOOLS = [
   // ── 3. interact ──
   {
     name: "interact",
-    description: "Element interaction: click, hover, type, fill form, select option, press key, drag & drop, scroll, file upload, focus, checkbox toggle. Actions: click, hover, type, fill, select, press, drag, scroll, upload, focus, check.",
+    description: [
+      "Element interaction: click, hover, type text, fill forms, select dropdown options, press keys, drag & drop, scroll, upload files, focus elements, and toggle checkboxes.",
+      "",
+      "Operations:",
+      "- click: Click an element (requires: tabId, uid or selector; optional: button[left|right|middle], clickCount — use 2 for double-click)",
+      "- hover: Hover over an element to trigger tooltips or menus (requires: tabId, uid or selector)",
+      "- type: Type text into a focused input field (requires: tabId, text, uid or selector; optional: clear[default:true] — clears field first, submit — press Enter after typing)",
+      "- fill: Fill multiple form fields in one call (requires: tabId, fields — array of {uid or selector, value, type[text|checkbox|radio|select]})",
+      "- select: Select an option from a <select> dropdown by value or visible text (requires: tabId, value, uid or selector)",
+      "- press: Press a keyboard key with optional modifiers (requires: tabId, key; optional: modifiers[Ctrl|Shift|Alt|Meta])",
+      "- drag: Drag an element to another element (requires: tabId, sourceUid or sourceSelector, targetUid or targetSelector)",
+      "- scroll: Scroll the page or a specific element (requires: tabId; optional: direction[up|down|left|right], amount[default:400px], x, y for absolute scroll, uid or selector for scrolling within an element)",
+      "- upload: Upload files to a file input (requires: tabId, files — array of absolute file paths, uid or selector)",
+      "- focus: Focus an element and scroll it into view (requires: tabId, uid or selector)",
+      "- check: Set a checkbox to checked or unchecked (requires: tabId, checked[true|false], uid or selector)",
+      "",
+      "Element Resolution: Provide either 'uid' (from a snapshot) or 'selector' (CSS selector). UIDs are preferred — they come from the accessibility snapshot and map to visible, interactive elements.",
+      "",
+      "Keys for press: Enter, Tab, Escape, Backspace, Delete, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Home, End, PageUp, PageDown, Space, F1-F12, Insert",
+    ].join("\n"),
+    annotations: {
+      title: "Element Interaction",
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -867,7 +1161,25 @@ const TOOLS = [
   // ── 4. execute ──
   {
     name: "execute",
-    description: "Execute JavaScript on page. Actions: eval (inline expression), script (async function body), call (function with element argument).",
+    description: [
+      "Execute JavaScript code on the page in three modes: inline expression evaluation, async script execution, and calling a function on a specific element.",
+      "",
+      "Operations:",
+      "- eval: Evaluate a JavaScript expression and return its value (requires: tabId, expression)",
+      "- script: Execute an async function body wrapped in an IIFE — use for multi-step JS logic (requires: tabId, code)",
+      "- call: Call a JavaScript function with a specific page element as its argument (requires: tabId, function — e.g. '(el) => el.textContent', uid or selector)",
+      "",
+      "Notes:",
+      "- eval returns the expression's value directly (must be JSON-serializable)",
+      "- script wraps your code in: (async () => { <your code> })() — use 'return' to send a value back",
+      "- call resolves the element first, then passes it as the first argument to your function",
+    ].join("\n"),
+    annotations: {
+      title: "Execute JavaScript",
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -886,11 +1198,32 @@ const TOOLS = [
   // ── 5. observe ──
   {
     name: "observe",
-    description: "Monitor console messages, network requests, get full request/response bodies, and performance metrics. Actions: console, network, request, performance.",
+    description: [
+      "Monitor browser console messages, network requests, retrieve full request/response bodies, and measure page performance metrics.",
+      "",
+      "Operations:",
+      "- console: Retrieve captured console messages (requires: tabId; optional: level[all|error|warning|log|info|debug], last — return only last N entries, clear — clear after returning)",
+      "- network: List captured network requests with URLs, methods, status codes, and timing (requires: tabId; optional: filter — URL substring, types — resource type filter array, last, clear)",
+      "- request: Get the full request and response body for a specific network request (requires: tabId, requestId — from network listing)",
+      "- performance: Collect page performance metrics including DOM size, JS heap, layout counts, and paint timing (requires: tabId)",
+      "- downloads: List tracked file downloads with progress info (requires: tabId; optional: last, clear)",
+      "",
+      "Network Resource Types: xhr, fetch, document, script, stylesheet, image, font, media, websocket, other",
+      "",
+      "Notes:",
+      "- Console and network monitoring starts automatically when first queried — no explicit enable needed",
+      "- Use 'clear: true' to reset captured data between test iterations",
+    ].join("\n"),
+    annotations: {
+      title: "Observe Browser",
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["console", "network", "request", "performance"], description: "Observe action." },
+        action: { type: "string", enum: ["console", "network", "request", "performance", "downloads"], description: "Observe action." },
         tabId: { type: "string", description: "Tab ID." },
         level: { type: "string", enum: ["all", "error", "warning", "log", "info", "debug"], description: "Console level filter." },
         filter: { type: "string", description: "Network URL filter." },
@@ -906,7 +1239,34 @@ const TOOLS = [
   // ── 6. emulate ──
   {
     name: "emulate",
-    description: "Emulate device/environment: viewport, color scheme, user agent, geolocation, CPU throttle, timezone, locale, vision deficiency, auto dark mode, idle state, network conditions, SSL bypass, URL blocking, extra headers. Pass 'reset: true' to clear all.",
+    description: [
+      "Emulate device characteristics and network conditions: viewport size, color scheme, user agent, geolocation, CPU throttle, timezone, locale, vision deficiency simulation, network throttling, SSL bypass, URL blocking, and custom headers. Pass 'reset: true' to clear all overrides.",
+      "",
+      "Operations (set any combination of properties in a single call):",
+      "- viewport: Set viewport dimensions (optional: {width, height, deviceScaleFactor, mobile, touch, landscape})",
+      "- colorScheme: Emulate preferred color scheme (optional: dark|light|auto)",
+      "- userAgent: Override the browser user agent string (optional: string)",
+      "- geolocation: Spoof geolocation (optional: {latitude, longitude})",
+      "- cpuThrottle: Throttle CPU speed — 1 = normal, 4 = 4x slower (optional: number)",
+      "- timezone: Override timezone (optional: string, e.g. 'America/New_York')",
+      "- locale: Override locale (optional: string, e.g. 'fr-FR')",
+      "- visionDeficiency: Simulate vision impairment (optional: none|protanopia|deuteranopia|tritanopia|achromatopsia|blurredVision)",
+      "- autoDarkMode: Force automatic dark mode (optional: boolean)",
+      "- idle: Emulate idle/locked screen state (optional: active|locked)",
+      "- networkCondition: Throttle network speed (optional: offline|slow3g|fast3g|slow4g|fast4g|none)",
+      "- ignoreSSL: Bypass SSL certificate errors (optional: boolean)",
+      "- blockUrls: Block requests matching URL patterns (optional: string array)",
+      "- extraHeaders: Set extra HTTP headers on all requests (optional: object)",
+      "- reset: Clear ALL emulation overrides (optional: true)",
+      "",
+      "Network Presets: offline (no connection), slow3g (2s latency, 50KB/s), fast3g (562ms, 180KB/s), slow4g (150ms, 400KB/s), fast4g (50ms, 1.5MB/s), none (remove throttling)",
+    ].join("\n"),
+    annotations: {
+      title: "Device Emulation",
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -934,7 +1294,23 @@ const TOOLS = [
   // ── 7. storage ──
   {
     name: "storage",
-    description: "Cookie and storage management. Actions: get_cookies, set_cookie, delete_cookies, clear_cookies, clear_data, quota.",
+    description: [
+      "Cookie and storage management: get, set, and delete cookies, clear browser storage, and check storage quota.",
+      "",
+      "Operations:",
+      "- get_cookies: Retrieve cookies (requires: tabId; optional: urls — filter by URLs)",
+      "- set_cookie: Set a cookie (requires: tabId, name, value; optional: domain, path, secure, httpOnly, sameSite[None|Lax|Strict], expires — epoch seconds)",
+      "- delete_cookies: Delete specific cookies by name (requires: tabId, name; optional: url, domain, path)",
+      "- clear_cookies: Clear all cookies for the browser profile (requires: tabId)",
+      "- clear_data: Clear browser storage for an origin (requires: tabId; optional: origin, types — comma-separated: 'cookies,local_storage,indexeddb,cache_storage' or 'all')",
+      "- quota: Check storage quota usage for the current page's origin (requires: tabId)",
+    ].join("\n"),
+    annotations: {
+      title: "Cookie & Storage",
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -960,7 +1336,30 @@ const TOOLS = [
   // ── 8. intercept ──
   {
     name: "intercept",
-    description: "HTTP request interception via CDP Fetch domain. Intercept, modify, mock, or block requests. Actions: enable, disable, continue, fulfill, fail, list.",
+    description: [
+      "HTTP request interception via CDP Fetch domain. Intercept, modify, mock, or block network requests in real-time.",
+      "",
+      "Operations:",
+      "- enable: Start intercepting requests matching URL patterns (requires: tabId; optional: patterns — array of URL glob patterns, e.g. ['*.api.example.com/*'])",
+      "- disable: Stop all request interception (requires: tabId)",
+      "- continue: Resume a paused request, optionally modifying it (requires: tabId, requestId; optional: url, method, headers, postData)",
+      "- fulfill: Respond to a paused request with a custom/mocked response (requires: tabId, requestId; optional: status, body, headers)",
+      "- fail: Abort a paused request with a network error (requires: tabId, requestId; optional: reason)",
+      "- list: List all currently paused/intercepted requests (requires: tabId)",
+      "",
+      "Failure Reasons: Failed, Aborted, TimedOut, AccessDenied, ConnectionClosed, ConnectionReset, ConnectionRefused, ConnectionAborted, ConnectionFailed, NameNotResolved, InternetDisconnected, AddressUnreachable, BlockedByClient, BlockedByResponse",
+      "",
+      "Notes:",
+      "- Call 'enable' first with URL patterns to start intercepting",
+      "- Intercepted requests are paused until you call continue, fulfill, or fail",
+      "- Each intercepted request has a unique requestId shown in the 'list' output",
+    ].join("\n"),
+    annotations: {
+      title: "Request Intercept",
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: true,
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -983,11 +1382,26 @@ const TOOLS = [
   // ── 9. cleanup ──
   {
     name: "cleanup",
-    description: "Disconnect from tabs and/or clean up temp files. Actions: disconnect_tab, disconnect_all, clean_temp, status.",
+    description: [
+      "Disconnect browser sessions and clean up temporary files created by the server.",
+      "",
+      "Operations:",
+      "- disconnect_tab: Disconnect from a specific tab session without closing the tab (requires: tabId)",
+      "- disconnect_all: Disconnect all active tab sessions (no parameters)",
+      "- clean_temp: Delete all temporary files (screenshots, PDFs) created by the server (no parameters)",
+      "- status: Show current server status — active sessions, temp file count, connection state (no parameters)",
+      "- list_sessions: List all active agent sessions with their TTL, idle time, and associated tabs (no parameters)",
+    ].join("\n"),
+    annotations: {
+      title: "Session Cleanup",
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["disconnect_tab", "disconnect_all", "clean_temp", "status"], description: "Cleanup action." },
+        action: { type: "string", enum: ["disconnect_tab", "disconnect_all", "clean_temp", "status", "list_sessions"], description: "Cleanup action." },
         tabId: { type: "string", description: "Tab ID for disconnect_tab." },
       },
       required: ["action"],
@@ -1121,7 +1535,52 @@ async function handlePageSnapshot(args) {
   const sess = await getTabSession(args.tabId);
   const snap = await buildSnapshot(sess);
   const header = `Page: ${snap.title}\nURL: ${snap.url}\nElements: ${snap.count}\n\n`;
+
+  // Compute incremental diff if previous snapshot exists
+  const prev = lastSnapshots.get(sess);
+  lastSnapshots.set(sess, { snapshot: snap.snapshot, url: snap.url, title: snap.title });
+
+  if (prev && prev.url === snap.url) {
+    const prevLines = prev.snapshot.split("\n");
+    const currLines = snap.snapshot.split("\n");
+    const diff = computeSnapshotDiff(prevLines, currLines);
+    if (diff.changed && diff.lines.length < currLines.length * 0.8) {
+      // Diff is meaningfully smaller than full snapshot
+      const diffText = diff.lines.join("\n");
+      return ok(
+        header +
+        `### Changes (${diff.added} added, ${diff.removed} removed)\n` +
+        diffText +
+        `\n\n### Full Snapshot\n` +
+        snap.snapshot
+      );
+    }
+  }
+
   return ok(header + snap.snapshot);
+}
+
+/** Compute a simple line-level diff between two snapshots */
+function computeSnapshotDiff(prevLines, currLines) {
+  const prevSet = new Set(prevLines);
+  const currSet = new Set(currLines);
+  const lines = [];
+  let added = 0, removed = 0;
+
+  for (const line of currLines) {
+    if (!prevSet.has(line)) {
+      lines.push("+ " + line);
+      added++;
+    }
+  }
+  for (const line of prevLines) {
+    if (!currSet.has(line)) {
+      lines.push("- " + line);
+      removed++;
+    }
+  }
+
+  return { changed: added > 0 || removed > 0, lines, added, removed };
 }
 
 async function handlePageScreenshot(args) {
@@ -1154,8 +1613,8 @@ async function handlePageContent(args) {
   const prop = args.format === "html" ? "innerHTML" : "innerText";
   let expr;
   if (args.uid !== undefined) {
-    const finder = uidResolver(args.uid);
-    expr = `(() => { const el = ${finder}; if (!el) return "Element not found (uid=${args.uid})"; return el.${prop}; })()`;
+    const finder = elementFinderExpr(args.uid);
+    expr = `(() => { const el = ${finder}; if (!el) return "Element not found (ref=${args.uid})"; return el.${prop}; })()`;
   } else {
     const sel = args.selector || "body";
     expr = `(() => { const el = document.querySelector(${JSON.stringify(sel)}); if (!el) return "Element not found: " + ${JSON.stringify(sel)}; return el.${prop}; })()`;
@@ -1254,7 +1713,7 @@ async function handlePageBypassCsp(args) {
 
 async function handleInteractClick(args) {
   const sess = await getTabSession(args.tabId);
-  const el = await resolveElement(sess, args.uid, args.selector);
+  const el = await checkActionability(sess, args.uid, args.selector);
   const button = args.button || "left";
   const clicks = args.clickCount || 1;
   const buttonCode = button === "right" ? 2 : button === "middle" ? 1 : 0;
@@ -1262,11 +1721,16 @@ async function handleInteractClick(args) {
   const buttonsMap = { left: 1, right: 2, middle: 4 };
   const buttons = buttonsMap[button] || 1;
 
-  await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: el.x, y: el.y }, sess);
-  await sleep(50);
-  await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x: el.x, y: el.y, button, clickCount: clicks, buttons }, sess);
-  await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x: el.x, y: el.y, button, clickCount: clicks }, sess);
-  return ok(`Clicked <${el.tag}> "${el.label}" at (${Math.round(el.x)}, ${Math.round(el.y)})`);
+  const { networkEvents } = await waitForCompletion(sess, async () => {
+    await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: el.x, y: el.y }, sess);
+    await sleep(50);
+    await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x: el.x, y: el.y, button, clickCount: clicks, buttons }, sess);
+    await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x: el.x, y: el.y, button, clickCount: clicks }, sess);
+  });
+
+  let msg = `Clicked <${el.tag}> "${el.label}" at (${Math.round(el.x)}, ${Math.round(el.y)})`;
+  if (networkEvents.length) msg += "\n\nNetwork activity:\n" + networkEvents.join("\n");
+  return ok(msg);
 }
 
 async function handleInteractHover(args) {
@@ -1281,7 +1745,13 @@ async function handleInteractType(args) {
   const sess = await getTabSession(args.tabId);
   const finder = elementFinderExpr(args.uid, args.selector);
   const clearCode = args.clear !== false
-    ? `if ('value' in el) { el.value = ''; el.dispatchEvent(new Event('input', {bubbles:true})); } else if (el.isContentEditable) { el.textContent = ''; }`
+    ? `if ('value' in el) {
+        const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+                          || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+        if (nativeSetter) nativeSetter.call(el, '');
+        else el.value = '';
+        el.dispatchEvent(new Event('input', {bubbles:true}));
+      } else if (el.isContentEditable) { el.textContent = ''; }`
     : "";
   const focused = await cdp("Runtime.evaluate", {
     expression: `(() => { const el = ${finder}; if (!el) return {error:"Element not found"}; el.scrollIntoView({block:"center"}); el.focus(); ${clearCode} return {ok:true}; })()`,
@@ -1289,10 +1759,26 @@ async function handleInteractType(args) {
   }, sess);
   if (focused.result.value?.error) return fail(focused.result.value.error);
 
-  await cdp("Input.insertText", { text: args.text }, sess);
-  await cdp("Runtime.evaluate", {
-    expression: `(() => { const el = document.activeElement; if(el){el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true}));} })()`,
-  }, sess);
+  const { networkEvents } = await waitForCompletion(sess, async () => {
+    // Use nativeInputValueSetter for React/Angular compatibility
+    await cdp("Runtime.evaluate", {
+      expression: `(() => {
+        const el = document.activeElement;
+        if (!el) return;
+        const val = ${JSON.stringify(args.text)};
+        if ('value' in el) {
+          const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+                            || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+          if (nativeSetter) nativeSetter.call(el, val);
+          else el.value = val;
+        } else if (el.isContentEditable) {
+          document.execCommand('insertText', false, val);
+        }
+        el.dispatchEvent(new Event('input', {bubbles:true}));
+        el.dispatchEvent(new Event('change', {bubbles:true}));
+      })()`,
+    }, sess);
+  });
 
   if (args.submit) {
     const k = resolveKey("Enter");
@@ -1301,68 +1787,145 @@ async function handleInteractType(args) {
   }
 
   const display = args.text.length > 60 ? args.text.substring(0, 60) + "..." : args.text;
-  return ok(`Typed "${display}"${args.submit ? " + Enter" : ""}`);
+  let msg = `Typed "${display}"${args.submit ? " + Enter" : ""}`;
+  if (networkEvents.length) msg += "\n\nNetwork activity:\n" + networkEvents.join("\n");
+  return ok(msg);
 }
 
 async function handleInteractFill(args) {
   if (!args.fields?.length) return fail("Provide 'fields' array.");
   const sess = await getTabSession(args.tabId);
   const results = [];
-  for (const field of args.fields) {
-    const finder = elementFinderExpr(field.uid, field.selector);
-    const fieldType = field.type || "text";
-    const code = `(() => {
-      const el = ${finder};
-      if (!el) return { error: "not found" };
-      el.scrollIntoView({ block: "center" });
-      const type = ${JSON.stringify(fieldType)};
-      const val = ${JSON.stringify(field.value)};
-      if (type === "checkbox") {
-        const wanted = val === "true" || val === "1";
-        if (el.checked !== wanted) el.click();
-        return { ok: true, value: String(el.checked) };
-      }
-      if (type === "radio") { el.click(); return { ok: true, value: val }; }
-      if (type === "select") {
-        let opt = Array.from(el.options).find(o => o.value === val || o.textContent.trim() === val);
-        if (!opt) return { error: "Option not found: " + val };
-        el.value = opt.value;
+
+  const { networkEvents } = await waitForCompletion(sess, async () => {
+    for (const field of args.fields) {
+      const finder = elementFinderExpr(field.uid, field.selector);
+      const fieldType = field.type || "text";
+      const code = `(() => {
+        const el = ${finder};
+        if (!el) return { error: "not found" };
+        el.scrollIntoView({ block: "center" });
+        const type = ${JSON.stringify(fieldType)};
+        const val = ${JSON.stringify(field.value)};
+        if (type === "checkbox") {
+          const wanted = val === "true" || val === "1";
+          if (el.checked !== wanted) el.click();
+          return { ok: true, value: String(el.checked) };
+        }
+        if (type === "radio") { el.click(); return { ok: true, value: val }; }
+        if (type === "select") {
+          let opt = Array.from(el.options).find(o => o.value === val || o.textContent.trim() === val);
+          if (!opt) return { error: "Option not found: " + val };
+          const nativeSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+          if (nativeSetter) nativeSetter.call(el, opt.value);
+          else el.value = opt.value;
+          el.dispatchEvent(new Event('input', {bubbles:true}));
+          el.dispatchEvent(new Event('change', {bubbles:true}));
+          return { ok: true, value: opt.textContent.trim() };
+        }
+        el.focus();
+        // Use nativeInputValueSetter for React/Angular compatibility
+        if ('value' in el) {
+          const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+                            || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+          if (nativeSetter) nativeSetter.call(el, val);
+          else el.value = val;
+        } else if (el.isContentEditable) {
+          el.textContent = val;
+        }
+        el.dispatchEvent(new Event('input', {bubbles:true}));
         el.dispatchEvent(new Event('change', {bubbles:true}));
-        return { ok: true, value: opt.textContent.trim() };
-      }
-      el.focus();
-      if ('value' in el) el.value = val; else el.textContent = val;
-      el.dispatchEvent(new Event('input', {bubbles:true}));
-      el.dispatchEvent(new Event('change', {bubbles:true}));
-      return { ok: true, value: val.substring(0, 40) };
-    })()`;
-    const r = await cdp("Runtime.evaluate", { expression: code, returnByValue: true }, sess);
-    results.push({ field: field.uid ?? field.selector, ...(r.result.value || { error: "eval failed" }) });
-  }
-  return ok({ filled: results });
+        return { ok: true, value: val.substring(0, 40) };
+      })()`;
+      const r = await cdp("Runtime.evaluate", { expression: code, returnByValue: true }, sess);
+      results.push({ field: field.uid ?? field.selector, ...(r.result.value || { error: "eval failed" }) });
+    }
+  });
+
+  const response = { filled: results };
+  if (networkEvents.length) response.networkActivity = networkEvents;
+  return ok(response);
 }
 
 async function handleInteractSelect(args) {
   if (!args.value) return fail("Provide 'value' to select.");
   const sess = await getTabSession(args.tabId);
   const finder = elementFinderExpr(args.uid, args.selector);
-  const result = await cdp("Runtime.evaluate", {
-    expression: `(() => {
-      const sel = ${finder};
-      if (!sel) return { error: "Element not found" };
-      if (sel.tagName !== "SELECT") return { error: "Not a <select> element" };
-      let opt = Array.from(sel.options).find(o => o.value === ${JSON.stringify(args.value)});
-      if (!opt) opt = Array.from(sel.options).find(o => o.textContent.trim() === ${JSON.stringify(args.value)});
-      if (!opt) return { error: "Option not found: " + ${JSON.stringify(args.value)} + ". Available: " + Array.from(sel.options).map(o => o.textContent.trim()).join(", ") };
-      sel.value = opt.value;
-      sel.dispatchEvent(new Event("change", { bubbles: true }));
-      return { selected: opt.textContent.trim(), value: opt.value };
-    })()`,
-    returnByValue: true,
-  }, sess);
-  const v = result.result.value;
-  if (v?.error) return fail(v.error);
-  return ok(`Selected "${v.selected}" (value: ${v.value})`);
+
+  const { networkEvents } = await waitForCompletion(sess, async () => {
+    const result = await cdp("Runtime.evaluate", {
+      expression: `(() => {
+        const sel = ${finder};
+        if (!sel) return { error: "Element not found" };
+
+        // Native <select> handling with proper event sequence
+        if (sel.tagName === "SELECT") {
+          let opt = Array.from(sel.options).find(o => o.value === ${JSON.stringify(args.value)});
+          if (!opt) opt = Array.from(sel.options).find(o => o.textContent.trim() === ${JSON.stringify(args.value)});
+          if (!opt) return { error: "Option not found: " + ${JSON.stringify(args.value)} + ". Available: " + Array.from(sel.options).map(o => o.textContent.trim()).join(", ") };
+
+          // Use nativeInputValueSetter for React compatibility
+          const nativeSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+          if (nativeSetter) nativeSetter.call(sel, opt.value);
+          else sel.value = opt.value;
+
+          // Dispatch full event sequence for framework compatibility
+          sel.dispatchEvent(new Event("input", { bubbles: true }));
+          sel.dispatchEvent(new Event("change", { bubbles: true }));
+          return { selected: opt.textContent.trim(), value: opt.value };
+        }
+
+        // Custom dropdown detection (combobox, listbox, MUI, Ant Design, React Select)
+        const role = sel.getAttribute("role");
+        const isCustomDropdown = role === "combobox" || role === "listbox" ||
+          sel.getAttribute("aria-haspopup") ||
+          sel.classList.toString().match(/MuiSelect|ant-select|react-select|Select/i);
+
+        if (isCustomDropdown) {
+          // Click to open the dropdown
+          sel.scrollIntoView({ block: "center" });
+          sel.click();
+          return { customDropdown: true, message: "Custom dropdown opened — click the matching option" };
+        }
+
+        return { error: "Not a <select> element and not a recognized custom dropdown. Element: <" + sel.tagName.toLowerCase() + ">" };
+      })()`,
+      returnByValue: true,
+    }, sess);
+    const v = result.result.value;
+    if (v?.error) throw new Error(v.error);
+
+    // If custom dropdown was opened, wait for options to appear and click matching one
+    if (v?.customDropdown) {
+      await sleep(300); // Wait for dropdown animation
+      const clickResult = await cdp("Runtime.evaluate", {
+        expression: `(() => {
+          const val = ${JSON.stringify(args.value)};
+          // Look for option elements in open dropdowns
+          const options = document.querySelectorAll('[role="option"], [role="listitem"], li[data-value], .MuiMenuItem-root, .ant-select-item, [class*="option"]');
+          for (const opt of options) {
+            const text = opt.textContent.trim();
+            const value = opt.getAttribute("data-value") || opt.getAttribute("value") || "";
+            if (text === val || value === val || text.toLowerCase() === val.toLowerCase()) {
+              opt.scrollIntoView({ block: "center" });
+              opt.click();
+              return { selected: text, value: value || text };
+            }
+          }
+          return { error: "Option not found in custom dropdown: " + val + ". Visible options: " + Array.from(options).slice(0, 10).map(o => o.textContent.trim()).join(", ") };
+        })()`,
+        returnByValue: true,
+      }, sess);
+      const cv = clickResult.result.value;
+      if (cv?.error) throw new Error(cv.error);
+      return cv;
+    }
+    return v;
+  });
+
+  let msg = `Selected option successfully`;
+  if (networkEvents.length) msg += "\n\nNetwork activity:\n" + networkEvents.join("\n");
+  return ok(msg);
 }
 
 async function handleInteractPress(args) {
@@ -1370,18 +1933,24 @@ async function handleInteractPress(args) {
   const sess = await getTabSession(args.tabId);
   const k = resolveKey(args.key);
   const mods = modifierFlags(args.modifiers);
-  await cdp("Input.dispatchKeyEvent", {
-    type: "keyDown", key: k.key, code: k.code,
-    windowsVirtualKeyCode: k.keyCode, nativeVirtualKeyCode: k.keyCode,
-    modifiers: mods, text: k.text,
-  }, sess);
-  await cdp("Input.dispatchKeyEvent", {
-    type: "keyUp", key: k.key, code: k.code,
-    windowsVirtualKeyCode: k.keyCode, nativeVirtualKeyCode: k.keyCode,
-    modifiers: mods,
-  }, sess);
+
+  const { networkEvents } = await waitForCompletion(sess, async () => {
+    await cdp("Input.dispatchKeyEvent", {
+      type: "keyDown", key: k.key, code: k.code,
+      windowsVirtualKeyCode: k.keyCode, nativeVirtualKeyCode: k.keyCode,
+      modifiers: mods, text: k.text,
+    }, sess);
+    await cdp("Input.dispatchKeyEvent", {
+      type: "keyUp", key: k.key, code: k.code,
+      windowsVirtualKeyCode: k.keyCode, nativeVirtualKeyCode: k.keyCode,
+      modifiers: mods,
+    }, sess);
+  });
+
   const modStr = args.modifiers?.length ? args.modifiers.join("+") + "+" : "";
-  return ok(`Pressed ${modStr}${args.key}`);
+  let msg = `Pressed ${modStr}${args.key}`;
+  if (networkEvents.length) msg += "\n\nNetwork activity:\n" + networkEvents.join("\n");
+  return ok(msg);
 }
 
 async function handleInteractDrag(args) {
@@ -1505,23 +2074,30 @@ async function handleInteractCheck(args) {
   if (args.checked === undefined) return fail("Provide 'checked' (true/false).");
   const sess = await getTabSession(args.tabId);
   const finder = elementFinderExpr(args.uid, args.selector);
-  const result = await cdp("Runtime.evaluate", {
-    expression: `(() => {
-      const el = ${finder};
-      if (!el) return { error: "Element not found" };
-      el.scrollIntoView({ block: "center" });
-      const desired = ${args.checked === true};
-      if (el.checked !== desired) {
-        el.click();
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-      return { checked: el.checked, label: (el.getAttribute("aria-label") || el.labels?.[0]?.textContent || "").trim().substring(0, 60) };
-    })()`,
-    returnByValue: true,
-  }, sess);
-  const v = result.result.value;
-  if (v?.error) return fail(v.error);
-  return ok(`Checkbox "${v.label}": ${v.checked ? "checked" : "unchecked"}`);
+
+  const { networkEvents } = await waitForCompletion(sess, async () => {
+    const result = await cdp("Runtime.evaluate", {
+      expression: `(() => {
+        const el = ${finder};
+        if (!el) return { error: "Element not found" };
+        el.scrollIntoView({ block: "center" });
+        const desired = ${args.checked === true};
+        if (el.checked !== desired) {
+          el.click();
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        return { checked: el.checked, label: (el.getAttribute("aria-label") || el.labels?.[0]?.textContent || "").trim().substring(0, 60) };
+      })()`,
+      returnByValue: true,
+    }, sess);
+    const v = result.result.value;
+    if (v?.error) throw new Error(v.error);
+    return v;
+  });
+
+  let msg = `Checkbox: ${args.checked ? "checked" : "unchecked"}`;
+  if (networkEvents.length) msg += "\n\nNetwork activity:\n" + networkEvents.join("\n");
+  return ok(msg);
 }
 
 // ─── Execute Handlers ───────────────────────────────────────────────
@@ -1702,6 +2278,23 @@ async function handleObservePerformance(args) {
     `Tasks: ${((m.TaskDuration || 0) * 1000).toFixed(1)}ms total`,
   ];
   return ok(`Performance Metrics:\n\n${lines.join("\n")}`);
+}
+
+async function handleObserveDownloads(args) {
+  const sess = await getTabSession(args.tabId);
+  await ensureDomain(sess, "Page");
+
+  let dl = downloads.get(sess) || [];
+  if (args.last) dl = dl.slice(-args.last);
+  if (args.clear) downloads.set(sess, []);
+  if (!dl.length) return ok("No downloads tracked yet. Downloads are captured automatically when they occur.");
+
+  const lines = dl.map(d => {
+    const pct = d.totalBytes > 0 ? ` ${((d.receivedBytes / d.totalBytes) * 100).toFixed(1)}%` : "";
+    const size = d.totalBytes > 0 ? ` ${(d.totalBytes / 1024).toFixed(1)}KB` : "";
+    return `[${d.state}]${pct}${size} ${d.suggestedFilename} — ${d.url.substring(0, 120)}`;
+  });
+  return ok(`${dl.length} download(s):\n\n${lines.join("\n")}`);
 }
 
 // ─── Emulate Handler ────────────────────────────────────────────────
@@ -2070,6 +2663,26 @@ async function handleCleanupCleanTemp() {
   return ok(`Cleaned up ${n} temp file(s) from ${TEMP_DIR}`);
 }
 
+async function handleCleanupListSessions() {
+  // Expire stale sessions first
+  const now = Date.now();
+  for (const [id, s] of agentSessions) {
+    if (now - s.lastActivity > SESSION_TTL) agentSessions.delete(id);
+  }
+  if (agentSessions.size === 0) return ok("No active agent sessions.");
+  const lines = [];
+  for (const [id, s] of agentSessions) {
+    const age = ((now - s.lastActivity) / 1000).toFixed(0);
+    const ttl = Math.max(0, ((SESSION_TTL - (now - s.lastActivity)) / 1000)).toFixed(0);
+    lines.push(`  ${id} — ${s.tabIds.size} tab(s), idle ${age}s, expires in ${ttl}s`);
+  }
+  return ok(
+    `Agent sessions: ${agentSessions.size}\n` +
+    `Session TTL: ${SESSION_TTL / 1000}s\n\n` +
+    lines.join("\n")
+  );
+}
+
 async function handleCleanupStatus() {
   const tabs = await getTabs();
   const tabList = tabs.slice(0, 10).map(t => {
@@ -2082,6 +2695,8 @@ async function handleCleanupStatus() {
     `Connected sessions: ${activeSessions.size}\n` +
     `Pending dialogs: ${[...pendingDialogs.values()].reduce((s, d) => s + d.length, 0)}\n` +
     `Pending intercepts: ${[...pendingFetchRequests.values()].reduce((s, m) => s + m.size, 0)}\n` +
+    `Active downloads: ${[...downloads.values()].reduce((s, d) => s + d.filter(x => x.state === "inProgress").length, 0)}\n` +
+    `Connection health: ${connectionHealth.status} (failures: ${connectionHealth.failures})\n` +
     `Temp dir: ${TEMP_DIR}\n` +
     `Temp files: ${existsSync(TEMP_DIR) ? readdirSync(TEMP_DIR).length : 0}\n` +
     `\nRecent tabs:\n${tabList}${more}`
@@ -2138,6 +2753,7 @@ const HANDLERS = {
     network: handleObserveNetwork,
     request: handleObserveRequest,
     performance: handleObservePerformance,
+    downloads: handleObserveDownloads,
   },
   emulate: handleEmulate,
   storage: {
@@ -2161,6 +2777,7 @@ const HANDLERS = {
     disconnect_all: handleCleanupDisconnectAll,
     clean_temp: handleCleanupCleanTemp,
     status: handleCleanupStatus,
+    list_sessions: handleCleanupListSessions,
   },
 };
 
@@ -2168,21 +2785,98 @@ async function handleTool(name, args) {
   const handler = HANDLERS[name];
   if (!handler) return fail(`Unknown tool: ${name}`);
 
+  // ── Per-agent session routing ──
+  const sessionId = args.sessionId;
+  if (sessionId) {
+    delete args.sessionId; // don't pass down to handlers
+    const now = Date.now();
+
+    // Expire stale sessions
+    for (const [id, s] of agentSessions) {
+      if (now - s.lastActivity > SESSION_TTL) agentSessions.delete(id);
+    }
+
+    // Get or create session
+    let session = agentSessions.get(sessionId);
+    if (!session) {
+      session = { lastActivity: now, tabIds: new Set() };
+      agentSessions.set(sessionId, session);
+    }
+    session.lastActivity = now;
+
+    // Track tab association
+    if (args.tabId) {
+      session.tabIds.add(args.tabId);
+    }
+
+    // For tab listing, filter to session-owned tabs if session has any
+    if (name === "tabs" && args.action === "list" && session.tabIds.size > 0) {
+      const result = await (typeof handler === "function" ? handler(args) : handler[args.action](args));
+      // Tag the result so the agent knows which tabs are theirs
+      if (result.content && result.content[0]) {
+        result.content[0].text = `[session: ${sessionId}] ` + result.content[0].text;
+      }
+      return result;
+    }
+  }
+
+  // ── Modal state guard ──
+  // If a JavaScript dialog is pending on the target tab, block all actions except page.dialog
+  if (args.tabId) {
+    const sid = activeSessions.get(args.tabId);
+    if (sid) {
+      const dialogs = pendingDialogs.get(sid) || [];
+      if (dialogs.length > 0 && !(name === "page" && args.action === "dialog")) {
+        const d = dialogs[0];
+        return fail(
+          `A JavaScript dialog is blocking the page. Handle it first.\n` +
+          `Dialog: ${d.type} "${d.message.substring(0, 100)}"\n` +
+          `→ Use page tool with action: 'dialog', tabId: '${args.tabId}', accept: true/false`
+        );
+      }
+    }
+  }
+
   // Single-function handler (emulate)
-  if (typeof handler === "function") return handler(args);
+  if (typeof handler === "function") {
+    const result = await handler(args);
+    return appendConsoleErrors(result, args.tabId);
+  }
 
   // Action-based dispatch
   const action = args.action;
   if (!action) return fail(`Missing 'action' parameter for tool '${name}'.`);
   const fn = handler[action];
   if (!fn) return fail(`Unknown action '${action}' for tool '${name}'. Available: ${Object.keys(handler).join(", ")}`);
-  return fn(args);
+  const result = await fn(args);
+  return appendConsoleErrors(result, args.tabId);
+}
+
+/**
+ * Auto-include recent console errors/warnings in tool responses.
+ * Appends any new error/warning messages that appeared since the last call.
+ */
+function appendConsoleErrors(result, tabId) {
+  if (!tabId || result.isError) return result;
+  const sid = activeSessions.get(tabId);
+  if (!sid) return result;
+
+  const logs = consoleLogs.get(sid) || [];
+  const recentErrors = logs
+    .filter(l => l.level === "error" || l.level === "warning")
+    .slice(-5) // last 5 errors/warnings
+    .map(l => `[${l.level.toUpperCase()}] ${l.text.substring(0, 150)}`);
+
+  if (recentErrors.length > 0 && result.content?.[0]?.type === "text") {
+    result.content[0].text += "\n\n### Console Errors\n" + recentErrors.join("\n");
+  }
+  return result;
 }
 
 // ─── MCP Server Setup ───────────────────────────────────────────────
 
 const server = new Server(
-  { name: "cdp-browser", version: "3.0.0" },
+  { name: "cdp-browser", version: "4.0.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -2195,6 +2889,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return fail(e.message);
   }
 });
+
+// ─── Periodic Session Cleanup ────────────────────────────────────────
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, s] of agentSessions) {
+    if (now - s.lastActivity > SESSION_TTL) {
+      agentSessions.delete(id);
+    }
+  }
+}, 60_000); // sweep every 60s
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
