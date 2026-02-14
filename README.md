@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-4.0.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-4.1.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/tools-9-green" alt="Tools">
   <img src="https://img.shields.io/badge/sub--actions-54+-green" alt="Actions">
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen" alt="Node">
@@ -32,7 +32,7 @@ Every other browser MCP server **launches a fresh browser** — no cookies, no l
 | Browser Use needs Python + LLM key | Heavy framework, double LLM cost |
 | BrowserTools MCP is read-only | Can observe but can't automate |
 
-**This server**: connects to Chrome on `localhost:9222`, uses the real browser state, and gives you **54+ automation actions** across 9 tools — all from a single `server.js` file with 2 dependencies.
+**This server**: connects to Chrome on `localhost:9222`, uses the real browser state, and gives you **54+ automation actions** across 9 tools — all from a single `server.js` file with 2 dependencies. Geolocation spoofing automatically grants browser permissions so permission-based sites just work.
 
 ---
 
@@ -190,7 +190,7 @@ The server communicates over stdio using the MCP protocol. Any MCP-compatible cl
 
 | Action | Description | Required | Optional |
 |--------|-------------|----------|----------|
-| `list` | List all open tabs with IDs, URLs, titles | — | — |
+| `list` | List all open tabs with IDs, URLs, titles | — | `showAll` |
 | `find` | Search tabs by title or URL substring | `query` | — |
 | `new` | Open a new tab | — | `url` |
 | `close` | Close a tab | `tabId` | — |
@@ -257,7 +257,7 @@ Set any combination of properties in a single call:
 | `viewport` | Screen dimensions | `{width, height, deviceScaleFactor, mobile, touch, landscape}` |
 | `colorScheme` | Color preference | `dark`, `light`, `auto` |
 | `userAgent` | User agent override | string |
-| `geolocation` | GPS spoofing | `{latitude, longitude}` |
+| `geolocation` | GPS spoofing (auto-grants permission) | `{latitude, longitude, accuracy, altitude}` |
 | `cpuThrottle` | CPU slowdown | number (1 = normal, 4 = 4x slower) |
 | `timezone` | Timezone override | e.g. `America/New_York` |
 | `locale` | Locale override | e.g. `fr-FR` |
@@ -302,7 +302,7 @@ Set any combination of properties in a single call:
 
 ---
 
-## Key Features (v4.0)
+## Key Features
 
 ### Stable Element References
 
@@ -359,12 +359,13 @@ After the first snapshot, subsequent calls return a line-level diff showing only
 
 ### Per-Agent Session Isolation
 
-Multiple AI agents can share the same Chrome instance without interfering. Each agent gets its own session with:
-- Scoped tab visibility (agent A can't see agent B's tabs)
+Multiple AI agents can share the same Chrome instance without interfering. Each server process is **automatically assigned a session** via `crypto.randomUUID()` — no opt-in needed. Each agent gets:
+- Scoped tab visibility (agent A can't see agent B's tabs via `tabs.list`)
 - Independent console/network logs
-- TTL-based expiry (default: 5 minutes, configurable via `CDP_SESSION_TTL`)
+- TTL-based expiry with full CDP cleanup (default: 5 minutes, configurable via `CDP_SESSION_TTL`)
+- Use `showAll: true` on `tabs.list` to bypass filtering and see all tabs
 
-Pass `sessionId` with any tool call to activate session scoping.
+Optionally pass a custom `sessionId` to reconnect to a specific session across restarts.
 
 ### Modal/Dialog Guards
 
@@ -518,13 +519,13 @@ WebSocket ping/pong every 30 seconds. If 2 consecutive pings fail, the connectio
 A: No. It connects directly to Chrome via CDP WebSocket. Only dependencies are `ws` and `@modelcontextprotocol/sdk`.
 
 **Q: Can multiple AI agents use it simultaneously?**  
-A: Yes. Pass a `sessionId` parameter to isolate each agent's tab visibility and state. Sessions auto-expire after 5 minutes.
+A: Yes. Each agent process is automatically assigned an isolated session — no configuration needed. Sessions auto-expire after 5 minutes. Pass a custom `sessionId` to reconnect to a previous session.
 
 **Q: Does it work with Chrome profiles / corporate Chrome?**  
 A: Yes. It connects to whatever Chrome instance is running on the configured port, including managed/enterprise Chrome with all its policies, certificates, and proxy settings.
 
 **Q: What about iframes and Shadow DOM?**  
-A: The snapshot uses `DOM.getDocument({depth: -1, pierce: true})` which traverses into iframes and shadow DOM. Element refs work across frames.
+A: The snapshot uses `Accessibility.getFullAXTree()` which captures the full accessibility tree including shadow DOM and iframes. Element refs work across frames.
 
 **Q: Can I use it with Edge?**  
 A: Edge (Chromium-based) works out of the box — same CDP protocol. Enable remote debugging the same way.

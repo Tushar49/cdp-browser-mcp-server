@@ -2,6 +2,24 @@
 
 All notable changes to CDP Browser MCP Server will be documented in this file.
 
+## [4.1.0] — 2026-02-14
+
+### Added
+- **Geolocation `accuracy` and `altitude` params** — `accuracy` (meters, default 100) and `altitude` (meters, optional) for realistic GPS spoofing
+- **Automatic geolocation permission granting** — 3-tier fallback: `Browser.grantPermissions` → `Browser.setPermission` → JS API override injection. Permission-based sites (e.g. where-am-i.co) now work without manual user prompts
+- **Auto-assigned per-process sessions** — each MCP server process gets a `crypto.randomUUID()` session automatically; no opt-in needed
+- **Tab ownership enforcement** — `tabs.list` filters to session-owned tabs by default
+- **`showAll` param for `tabs.list`** — bypasses session filtering to see all browser tabs
+- **`sessionId` declared in all tool schemas** — visible and documented, not a hidden convention
+
+### Changed
+- Session isolation is now automatic — every tool call routes through a session (uses `args.sessionId` or auto-assigned process session)
+- `detachTab` now removes tab from all `agentSessions` to prevent stale references
+- Session expiry now calls `detachTab` for each owned tab, properly cleaning up CDP sessions, console logs, network captures, and ref maps
+
+### Fixed
+- Geolocation spoofing on permission-based sites — `Emulation.setGeolocationOverride` alone wasn't enough; browser permission grants are now handled automatically
+
 ## [4.0.0] — 2026-02-14
 
 ### Added
@@ -45,6 +63,7 @@ All notable changes to CDP Browser MCP Server will be documented in this file.
 
 ---
 
+[4.1.0]: https://github.com/Tushar49/cdp-browser-mcp-server/compare/v4.0.0...v4.1.0
 [4.0.0]: https://github.com/Tushar49/cdp-browser-mcp-server/compare/v3.0.0...v4.0.0
 [3.0.0]: https://github.com/Tushar49/cdp-browser-mcp-server/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/Tushar49/cdp-browser-mcp-server/releases/tag/v2.0.0
