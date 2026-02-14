@@ -102,8 +102,8 @@ google-chrome --remote-debugging-port=9222
 ### Step 2: Clone & Install
 
 ```bash
-git clone https://github.com/user/cdp-browser-automation.git
-cd cdp-browser-automation/MCP\ Server
+git clone https://github.com/Tushar49/cdp-browser-mcp-server.git
+cd cdp-browser-mcp-server/MCP\ Server
 npm install
 ```
 
