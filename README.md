@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-4.1.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-4.2.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/tools-9-green" alt="Tools">
   <img src="https://img.shields.io/badge/sub--actions-54+-green" alt="Actions">
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen" alt="Node">
@@ -208,14 +208,14 @@ The server communicates over stdio using the MCP protocol. Any MCP-compatible cl
 
 | Action | Description | Required | Optional |
 |--------|-------------|----------|----------|
-| `goto` | Navigate to URL, wait for load | `tabId`, `url` | — |
-| `back` | Navigate back in history | `tabId` | — |
-| `forward` | Navigate forward in history | `tabId` | — |
-| `reload` | Reload page | `tabId` | `ignoreCache` |
+| `goto` | Navigate to URL, wait for load | `tabId`, `url` | `waitUntil`, `timeout` |
+| `back` | Navigate back in history | `tabId` | `waitUntil`, `timeout` |
+| `forward` | Navigate forward in history | `tabId` | `waitUntil`, `timeout` |
+| `reload` | Reload page | `tabId` | `ignoreCache`, `waitUntil`, `timeout` |
 | `snapshot` | Accessibility tree with element refs | `tabId` | — |
-| `screenshot` | Capture page or element as image | `tabId` | `fullPage`, `quality`, `uid`, `savePath` |
+| `screenshot` | Capture page or element as image | `tabId` | `fullPage`, `quality`, `uid`, `type`, `path` |
 | `content` | Extract text or HTML | `tabId` | `uid`, `selector`, `format` |
-| `wait` | Wait for text, selector, or fixed delay | `tabId` | `text`, `textGone`, `selector`, `time`(ms), `timeout`(ms) |
+| `wait` | Wait for condition or fixed delay | `tabId` | `text`, `textGone`, `selector`, `state`, `timeout`(ms) |
 | `pdf` | Export page as PDF | `tabId` | `landscape`, `scale`, `paperWidth`, `paperHeight`, `margin` |
 | `dialog` | Handle JS alert/confirm/prompt | `tabId` | `accept`, `text` |
 | `inject` | Inject script on every page load | `tabId`, `script` | — |
@@ -225,9 +225,9 @@ The server communicates over stdio using the MCP protocol. Any MCP-compatible cl
 
 | Action | Description | Required | Optional |
 |--------|-------------|----------|----------|
-| `click` | Click an element | `tabId`, `uid` or `selector` | `button`, `clickCount` |
-| `hover` | Hover to trigger tooltips/menus | `tabId`, `uid` or `selector` | — |
-| `type` | Type text into input field | `tabId`, `text`, `uid` or `selector` | `clear`, `submit` |
+| `click` | Click an element | `tabId`, `uid` or `selector` | `button`, `clickCount`, `modifiers` |
+| `hover` | Hover to trigger tooltips/menus | `tabId`, `uid` or `selector` | `modifiers` |
+| `type` | Type text into input field | `tabId`, `text`, `uid` or `selector` | `clear`, `submit`, `delay` |
 | `fill` | Fill multiple form fields at once | `tabId`, `fields[]` | — |
 | `select` | Select dropdown option | `tabId`, `value`, `uid` or `selector` | — |
 | `press` | Press keyboard key | `tabId`, `key` | `modifiers` |

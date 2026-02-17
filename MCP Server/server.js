@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * CDP Browser Automation — MCP Server  v4.1
+ * CDP Browser Automation — MCP Server  v4.2
  *
  * 9 consolidated tools with ~50 sub-actions for full browser automation.
  * v4 upgrades: stable element refs (backendNodeId), auto-waiting, incremental snapshots,
@@ -690,6 +690,43 @@ function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
+/**
+ * Wait for page ready state based on waitUntil strategy (like Playwright):
+ * - "load": document.readyState === "complete" (default)
+ * - "domcontentloaded": document.readyState !== "loading"
+ * - "networkidle": readyState complete + no network activity for 500ms
+ * - "commit": returns immediately (handled by caller)
+ */
+async function waitForReadyState(sess, waitUntil, timeout) {
+  const start = Date.now();
+  const target = waitUntil === "domcontentloaded" ? "interactive" : "complete";
+  while (Date.now() - start < timeout) {
+    try {
+      const r = await cdp("Runtime.evaluate", { expression: "document.readyState", returnByValue: true }, sess, 3000);
+      const state = r.result.value;
+      if (target === "interactive" && state !== "loading") break;
+      if (target === "complete" && state === "complete") break;
+    } catch { /* page transitioning */ }
+    await sleep(500);
+  }
+  // For networkidle, also wait for no pending requests for 500ms
+  if (waitUntil === "networkidle") {
+    const idleStart = Date.now();
+    let lastActivity = Date.now();
+    while (Date.now() - idleStart < Math.min(5000, timeout - (Date.now() - start))) {
+      try {
+        const r = await cdp("Runtime.evaluate", {
+          expression: `performance.getEntriesByType('resource').filter(e => e.responseEnd === 0).length`,
+          returnByValue: true,
+        }, sess, 2000);
+        if (r.result.value > 0) lastActivity = Date.now();
+        if (Date.now() - lastActivity > 500) break;
+      } catch { break; }
+      await sleep(200);
+    }
+  }
+}
+
 // ─── Auto-Waiting (Playwright-inspired) ─────────────────────────────
 
 /**
@@ -1056,14 +1093,14 @@ const TOOLS = [
       "Page-level operations: navigation, accessibility snapshots, screenshots, content extraction, waiting, PDF export, dialog handling, script injection, and CSP bypass.",
       "",
       "Operations:",
-      "- goto: Navigate to a URL and wait for page load (requires: tabId, url)",
-      "- back: Navigate back in browser history (requires: tabId)",
-      "- forward: Navigate forward in browser history (requires: tabId)",
-      "- reload: Reload the current page (requires: tabId; optional: ignoreCache)",
+      "- goto: Navigate to a URL and wait for page load (requires: tabId, url; optional: waitUntil[load|domcontentloaded|networkidle|commit], timeout)",
+      "- back: Navigate back in browser history (requires: tabId; optional: waitUntil, timeout)",
+      "- forward: Navigate forward in browser history (requires: tabId; optional: waitUntil, timeout)",
+      "- reload: Reload the current page (requires: tabId; optional: ignoreCache, waitUntil, timeout)",
       "- snapshot: Capture accessibility tree snapshot with element refs for interaction (requires: tabId)",
-      "- screenshot: Take a screenshot of the page or a specific element (requires: tabId; optional: fullPage, quality, uid, savePath — absolute file path to save to disk)",
+      "- screenshot: Take a screenshot of the page or a specific element (requires: tabId; optional: fullPage, quality, uid, type[png|jpeg], path — absolute file path to save to disk)",
       "- content: Extract text or HTML content from the page or an element (requires: tabId; optional: uid, selector, format[text|html])",
-      "- wait: Wait for text to appear/disappear, a CSS selector to match, or a fixed delay (requires: tabId; provide one of: text, textGone, selector, or time; optional: timeout)",
+      "- wait: Wait for condition or fixed delay (requires: tabId; provide text, textGone, selector for polling — or just timeout for fixed delay; optional: timeout[ms], state[visible|hidden|attached|detached] for selector waits)",
       "- pdf: Export page as PDF to temp file (requires: tabId; optional: landscape, scale, paperWidth, paperHeight, margin{top,bottom,left,right})",
       "- dialog: Handle a pending JavaScript dialog (alert/confirm/prompt) (requires: tabId; optional: accept[default:true], text for prompt response)",
       "- inject: Inject a script that runs on every new document load (requires: tabId, script)",
@@ -1073,8 +1110,8 @@ const TOOLS = [
       "- Always take a snapshot before interacting with elements — it provides uid refs needed by interact tools",
       "- The snapshot returns an accessibility tree with roles, names, and properties matching ARIA semantics",
       "- Wait actions poll every 300ms up to the timeout (default: 10000ms)",
-      "- Both 'time' and 'timeout' are in MILLISECONDS (e.g. time: 3000 = 3 seconds). Max time: 60000ms",
-      "- Screenshots: pass 'savePath' (absolute file path) to save the image to disk instead of returning base64",
+      "- All timeouts are in MILLISECONDS (e.g. timeout: 3000 = 3 seconds). Use timeout alone for a fixed delay (like Playwright's waitForTimeout).",
+      "- Screenshots: pass 'path' (absolute file path) to save to disk instead of inline base64. Use 'type' to control format (png default, jpeg for smaller size).",
     ].join("\n"),
     annotations: {
       title: "Page Operations",
@@ -1088,17 +1125,19 @@ const TOOLS = [
         action: { type: "string", enum: ["goto", "back", "forward", "reload", "snapshot", "screenshot", "content", "wait", "pdf", "dialog", "inject", "bypass_csp"], description: "Page action." },
         tabId: { type: "string", description: "Tab ID." },
         url: { type: "string", description: "URL for goto." },
+        waitUntil: { type: "string", enum: ["load", "domcontentloaded", "networkidle", "commit"], description: "When to consider navigation complete (default: load). Matches Playwright conventions." },
         ignoreCache: { type: "boolean", description: "Ignore cache on reload." },
         fullPage: { type: "boolean", description: "Full-page screenshot." },
-        quality: { type: "number", description: "JPEG quality 0-100." },
-        savePath: { type: "string", description: "Absolute file path to save screenshot to disk (e.g. 'C:/screenshots/step1.png'). Returns file path instead of base64 image." },
+        quality: { type: "number", description: "JPEG quality 0-100 (automatically sets format to jpeg)." },
+        type: { type: "string", enum: ["png", "jpeg"], description: "Image format (default: png). Use jpeg for smaller file size." },
+        path: { type: "string", description: "Absolute file path to save screenshot to disk (e.g. 'C:/screenshots/step1.png'). Returns file path instead of base64 image." },
         uid: { type: "number", description: "Element uid for screenshot/content." },
         selector: { type: "string", description: "CSS selector for content/wait." },
         format: { type: "string", enum: ["text", "html"], description: "Content format." },
         text: { type: "string", description: "Text to wait for / dialog prompt text." },
         textGone: { type: "string", description: "Text to wait to disappear." },
-        time: { type: "number", description: "Fixed wait delay in milliseconds (e.g. 3000 = 3 seconds). Max 60000ms (60s)." },
-        timeout: { type: "number", description: "Max polling timeout in milliseconds for text/selector/textGone waits (default: 10000ms)." },
+        timeout: { type: "number", description: "Timeout in milliseconds. With text/textGone/selector: max polling time (default: 10000ms). Alone: fixed delay like Playwright's waitForTimeout. Max: 60000ms." },
+        state: { type: "string", enum: ["visible", "hidden", "attached", "detached"], description: "Element state to wait for when using selector (default: attached). Matches Playwright's locator.waitFor states." },
         accept: { type: "boolean", description: "Accept (true) or dismiss (false) dialog." },
         landscape: { type: "boolean", description: "PDF landscape orientation." },
         scale: { type: "number", description: "PDF scale factor." },
@@ -1120,12 +1159,12 @@ const TOOLS = [
       "Element interaction: click, hover, type text, fill forms, select dropdown options, press keys, drag & drop, scroll, upload files, focus elements, and toggle checkboxes.",
       "",
       "Operations:",
-      "- click: Click an element (requires: tabId, uid or selector; optional: button[left|right|middle], clickCount — use 2 for double-click)",
-      "- hover: Hover over an element to trigger tooltips or menus (requires: tabId, uid or selector)",
-      "- type: Type text into a focused input field (requires: tabId, text, uid or selector; optional: clear[default:true] — clears field first, submit — press Enter after typing)",
+      "- click: Click an element (requires: tabId, uid or selector; optional: button[left|right|middle], clickCount — use 2 for double-click, modifiers[Control|Shift|Alt|Meta])",
+      "- hover: Hover over an element to trigger tooltips or menus (requires: tabId, uid or selector; optional: modifiers[Control|Shift|Alt|Meta])",
+      "- type: Type text into a focused input field (requires: tabId, text, uid or selector; optional: clear[default:true] — clears field first, submit — press Enter after typing, delay — ms between keystrokes for char-by-char typing)",
       "- fill: Fill multiple form fields in one call (requires: tabId, fields — array of {uid or selector, value, type[text|checkbox|radio|select]})",
       "- select: Select an option from a <select> dropdown by value or visible text (requires: tabId, value, uid or selector)",
-      "- press: Press a keyboard key with optional modifiers (requires: tabId, key; optional: modifiers[Ctrl|Shift|Alt|Meta])",
+      "- press: Press a keyboard key with optional modifiers (requires: tabId, key; optional: modifiers[Control|Shift|Alt|Meta])",
       "- drag: Drag an element to another element (requires: tabId, sourceUid or sourceSelector, targetUid or targetSelector)",
       "- scroll: Scroll the page or a specific element (requires: tabId; optional: direction[up|down|left|right], amount[default:400px], x, y for absolute scroll, uid or selector for scrolling within an element)",
       "- upload: Upload files to a file input (requires: tabId, files — array of absolute file paths, uid or selector)",
@@ -1151,13 +1190,14 @@ const TOOLS = [
         selector: { type: "string", description: "CSS selector." },
         button: { type: "string", enum: ["left", "right", "middle"], description: "Mouse button for click." },
         clickCount: { type: "number", description: "Click count (2 = double-click)." },
+        modifiers: { type: "array", items: { type: "string", enum: ["Control", "Shift", "Alt", "Meta"] }, description: "Modifier keys held during click, hover, or press. Matches Playwright naming." },
         text: { type: "string", description: "Text to type." },
         clear: { type: "boolean", description: "Clear field before typing (default: true)." },
         submit: { type: "boolean", description: "Press Enter after typing." },
         fields: { type: "array", description: "Fields for fill: [{uid, selector, value, type}].", items: { type: "object", properties: { uid: { type: "number" }, selector: { type: "string" }, value: { type: "string" }, type: { type: "string", enum: ["text", "checkbox", "radio", "select"] } }, required: ["value"] } },
         value: { type: "string", description: "Value for select action." },
         key: { type: "string", description: "Key for press action." },
-        modifiers: { type: "array", items: { type: "string", enum: ["Ctrl", "Shift", "Alt", "Meta"] }, description: "Modifier keys for press." },
+        delay: { type: "number", description: "Delay in ms between keystrokes for type action (enables char-by-char typing like Playwright's pressSequentially)." },
         sourceUid: { type: "number", description: "Drag source uid." },
         sourceSelector: { type: "string", description: "Drag source selector." },
         targetUid: { type: "number", description: "Drag target uid." },
@@ -1503,14 +1543,14 @@ async function handlePageGoto(args) {
   await ensureDomain(sess, "Page");
   const result = await cdp("Page.navigate", { url: args.url }, sess);
   if (result.errorText) return fail(`Navigation failed: ${result.errorText}`);
-  const start = Date.now();
-  while (Date.now() - start < 30000) {
-    try {
-      const r = await cdp("Runtime.evaluate", { expression: "document.readyState", returnByValue: true }, sess, 3000);
-      if (r.result.value === "complete") break;
-    } catch { /* page transitioning */ }
-    await sleep(500);
+  const waitUntil = args.waitUntil || "load";
+  if (waitUntil === "commit") {
+    // Navigation already committed at this point
+    const title = await cdp("Runtime.evaluate", { expression: "document.title", returnByValue: true }, sess);
+    return ok(`Navigated to: ${args.url}\nTitle: ${title.result.value}`);
   }
+  const navTimeout = args.timeout || 30000;
+  await waitForReadyState(sess, waitUntil, navTimeout);
   const title = await cdp("Runtime.evaluate", { expression: "document.title", returnByValue: true }, sess);
   return ok(`Navigated to: ${args.url}\nTitle: ${title.result.value}`);
 }
@@ -1520,7 +1560,10 @@ async function handlePageBack(args) {
   const { currentIndex, entries } = await cdp("Page.getNavigationHistory", {}, sess);
   if (currentIndex > 0) {
     await cdp("Page.navigateToHistoryEntry", { entryId: entries[currentIndex - 1].id }, sess);
-    await sleep(500);
+    const waitUntil = args.waitUntil || "load";
+    const navTimeout = args.timeout || 15000;
+    if (waitUntil !== "commit") await waitForReadyState(sess, waitUntil, navTimeout);
+    else await sleep(300);
     const r = await cdp("Runtime.evaluate", { expression: "document.title + ' — ' + location.href", returnByValue: true }, sess);
     return ok(`Navigated back → ${r.result.value}`);
   }
@@ -1532,7 +1575,10 @@ async function handlePageForward(args) {
   const { currentIndex, entries } = await cdp("Page.getNavigationHistory", {}, sess);
   if (currentIndex < entries.length - 1) {
     await cdp("Page.navigateToHistoryEntry", { entryId: entries[currentIndex + 1].id }, sess);
-    await sleep(500);
+    const waitUntil = args.waitUntil || "load";
+    const navTimeout = args.timeout || 15000;
+    if (waitUntil !== "commit") await waitForReadyState(sess, waitUntil, navTimeout);
+    else await sleep(300);
     const r = await cdp("Runtime.evaluate", { expression: "document.title + ' — ' + location.href", returnByValue: true }, sess);
     return ok(`Navigated forward → ${r.result.value}`);
   }
@@ -1542,14 +1588,10 @@ async function handlePageForward(args) {
 async function handlePageReload(args) {
   const sess = await getTabSession(args.tabId);
   await cdp("Page.reload", { ignoreCache: args.ignoreCache || false }, sess);
-  const start = Date.now();
-  while (Date.now() - start < 15000) {
-    try {
-      const r = await cdp("Runtime.evaluate", { expression: "document.readyState", returnByValue: true }, sess, 3000);
-      if (r.result.value === "complete") break;
-    } catch { /* transitioning */ }
-    await sleep(500);
-  }
+  const waitUntil = args.waitUntil || "load";
+  const navTimeout = args.timeout || 15000;
+  if (waitUntil !== "commit") await waitForReadyState(sess, waitUntil, navTimeout);
+  else await sleep(300);
   return ok("Page reloaded.");
 }
 
@@ -1608,11 +1650,15 @@ function computeSnapshotDiff(prevLines, currLines) {
 async function handlePageScreenshot(args) {
   const sess = await getTabSession(args.tabId);
   const params = {};
+  // Format: explicit type > quality implies jpeg > default png
   if (args.quality !== undefined) {
     params.format = "jpeg";
     params.quality = args.quality;
+  } else if (args.type === "jpeg") {
+    params.format = "jpeg";
+    params.quality = 80;
   } else {
-    params.format = "png";
+    params.format = args.type || "png";
   }
 
   // Element-level screenshot via uid
@@ -1627,13 +1673,14 @@ async function handlePageScreenshot(args) {
     params.clip = { x: 0, y: 0, width, height, scale: 1 };
   }
   const { data } = await cdp("Page.captureScreenshot", params, sess);
-  // Save to disk if savePath provided
-  if (args.savePath) {
+  // Save to disk if path provided (also accept legacy savePath)
+  const saveTo = args.path || args.savePath;
+  if (saveTo) {
     const buf = Buffer.from(data, "base64");
-    const dir = args.savePath.replace(/[\\/][^\\/]+$/, "");
+    const dir = saveTo.replace(/[\\/][^\\/]+$/, "");
     if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(args.savePath, buf);
-    return ok(`Screenshot saved to: ${args.savePath}\nSize: ${(buf.length / 1024).toFixed(1)} KB`);
+    writeFileSync(saveTo, buf);
+    return ok(`Screenshot saved to: ${saveTo}\nSize: ${(buf.length / 1024).toFixed(1)} KB`);
   }
   return { content: [{ type: "image", data, mimeType: params.format === "jpeg" ? "image/jpeg" : "image/png" }] };
 }
@@ -1659,31 +1706,53 @@ async function handlePageContent(args) {
 }
 
 async function handlePageWait(args) {
-  if (args.time) {
-    // Everything in milliseconds — cap at 60 seconds
+  // Fixed delay: just timeout with no condition (like Playwright's waitForTimeout)
+  if (args.timeout && !args.selector && !args.text && !args.textGone) {
+    const timeMs = Math.min(args.timeout, 60000);
+    await sleep(timeMs);
+    return ok(`Waited ${timeMs}ms.${args.timeout > 60000 ? ` (capped from ${args.timeout}ms)` : ""}`);
+  }
+  // Legacy support: accept 'time' param but treat as timeout-only delay
+  if (args.time && !args.selector && !args.text && !args.textGone) {
     const timeMs = Math.min(args.time, 60000);
     await sleep(timeMs);
-    return ok(`Waited ${timeMs}ms.${args.time > 60000 ? ` (capped from ${args.time}ms)` : ""}`);
+    return ok(`Waited ${timeMs}ms.`);
   }
   if (!args.selector && !args.text && !args.textGone) {
-    return fail("Provide 'text', 'textGone', 'selector', or 'time'.");
+    return fail("Provide 'text', 'textGone', or 'selector' for conditional wait — or just 'timeout' for a fixed delay.");
   }
   const sess = await getTabSession(args.tabId);
   const timeout = args.timeout || 10000;
   const start = Date.now();
+  const state = args.state || "attached";
   while (Date.now() - start < timeout) {
     let expr;
     if (args.textGone) expr = `!document.body.innerText.includes(${JSON.stringify(args.textGone)})`;
     else if (args.text) expr = `document.body.innerText.includes(${JSON.stringify(args.text)})`;
-    else expr = `!!document.querySelector(${JSON.stringify(args.selector)})`;
+    else {
+      // Selector wait with state support (matches Playwright's waitFor states)
+      switch (state) {
+        case "detached":
+          expr = `!document.querySelector(${JSON.stringify(args.selector)})`;
+          break;
+        case "hidden":
+          expr = `(() => { const el = document.querySelector(${JSON.stringify(args.selector)}); return !el || el.offsetParent === null || getComputedStyle(el).visibility === 'hidden' || getComputedStyle(el).display === 'none'; })()`;
+          break;
+        case "visible":
+          expr = `(() => { const el = document.querySelector(${JSON.stringify(args.selector)}); return el && el.offsetParent !== null && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'; })()`;
+          break;
+        default: // "attached"
+          expr = `!!document.querySelector(${JSON.stringify(args.selector)})`;
+      }
+    }
     const r = await cdp("Runtime.evaluate", { expression: expr, returnByValue: true }, sess, 5000);
     if (r.result.value === true) {
-      const what = args.textGone ? `"${args.textGone}" disappeared` : args.text ? `"${args.text}" appeared` : `${args.selector} found`;
+      const what = args.textGone ? `"${args.textGone}" disappeared` : args.text ? `"${args.text}" appeared` : `${args.selector} ${state}`;
       return ok(`${what} (${Date.now() - start}ms)`);
     }
     await sleep(300);
   }
-  return fail(`Timed out (${timeout}ms) waiting for ${args.textGone || args.text || args.selector}`);
+  return fail(`Timed out (${timeout}ms) waiting for ${args.textGone || args.text || args.selector}${args.selector ? ` [state: ${state}]` : ""}`);
 }
 
 async function handlePagePdf(args) {
@@ -1797,11 +1866,13 @@ async function handleInteractClick(args) {
     } catch {}
   }
 
+  const mods = modifierFlags(args.modifiers);
+
   const { networkEvents } = await waitForCompletion(sess, async () => {
-    await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: el.x, y: el.y }, sess);
+    await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: el.x, y: el.y, modifiers: mods }, sess);
     await sleep(50);
-    await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x: el.x, y: el.y, button, clickCount: clicks, buttons }, sess);
-    await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x: el.x, y: el.y, button, clickCount: clicks }, sess);
+    await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x: el.x, y: el.y, button, clickCount: clicks, buttons, modifiers: mods }, sess);
+    await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x: el.x, y: el.y, button, clickCount: clicks, modifiers: mods }, sess);
   });
 
   // Smart JS click fallback: if the element is a web component or popup trigger
@@ -1855,7 +1926,8 @@ async function handleInteractClick(args) {
 async function handleInteractHover(args) {
   const sess = await getTabSession(args.tabId);
   const el = await resolveElement(sess, args.uid, args.selector);
-  await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: el.x, y: el.y }, sess);
+  const mods = modifierFlags(args.modifiers);
+  await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: el.x, y: el.y, modifiers: mods }, sess);
   return ok(`Hovering over <${el.tag}> "${el.label}" at (${Math.round(el.x)}, ${Math.round(el.y)})`);
 }
 
@@ -1880,24 +1952,33 @@ async function handleInteractType(args) {
   if (focused.result.value?.error) return fail(focused.result.value.error);
 
   const { networkEvents } = await waitForCompletion(sess, async () => {
-    // Use nativeInputValueSetter for React/Angular compatibility
-    await cdp("Runtime.evaluate", {
-      expression: `(() => {
-        const el = document.activeElement;
-        if (!el) return;
-        const val = ${JSON.stringify(args.text)};
-        if ('value' in el) {
-          const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
-                            || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
-          if (nativeSetter) nativeSetter.call(el, val);
-          else el.value = val;
-        } else if (el.isContentEditable) {
-          document.execCommand('insertText', false, val);
-        }
-        el.dispatchEvent(new Event('input', {bubbles:true}));
-        el.dispatchEvent(new Event('change', {bubbles:true}));
-      })()`,
-    }, sess);
+    if (args.delay && args.delay > 0) {
+      // Character-by-character typing with delay (like Playwright's pressSequentially)
+      for (const char of args.text) {
+        await cdp("Input.dispatchKeyEvent", { type: "keyDown", text: char, key: char, unmodifiedText: char }, sess);
+        await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: char }, sess);
+        await sleep(args.delay);
+      }
+    } else {
+      // Instant fill using nativeInputValueSetter for React/Angular compatibility
+      await cdp("Runtime.evaluate", {
+        expression: `(() => {
+          const el = document.activeElement;
+          if (!el) return;
+          const val = ${JSON.stringify(args.text)};
+          if ('value' in el) {
+            const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+                              || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+            if (nativeSetter) nativeSetter.call(el, val);
+            else el.value = val;
+          } else if (el.isContentEditable) {
+            document.execCommand('insertText', false, val);
+          }
+          el.dispatchEvent(new Event('input', {bubbles:true}));
+          el.dispatchEvent(new Event('change', {bubbles:true}));
+        })()`,
+      }, sess);
+    }
   });
 
   if (args.submit) {

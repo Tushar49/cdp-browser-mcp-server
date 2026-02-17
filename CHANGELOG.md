@@ -2,6 +2,25 @@
 
 All notable changes to CDP Browser MCP Server will be documented in this file.
 
+## [4.2.0] — 2026-02-14
+
+### Playwright Alignment — Comprehensive API Audit & Improvements
+
+This release brings the CDP Browser MCP Server's API surface in line with Playwright conventions. Users familiar with Playwright will find our params, naming, and behavior familiar and predictable.
+
+### Changed
+- **`page.wait` — merged `time` into `timeout`** — no more separate params. Use `timeout` alone for a fixed delay (like Playwright's `waitForTimeout`), or with `text`/`textGone`/`selector` as the polling cap. Legacy `time` still accepted silently
+- **`page.screenshot` — renamed `savePath` to `path`** — matches Playwright's `path` convention. Legacy `savePath` still accepted silently
+- **`interact.press/click/hover` modifiers — renamed `Ctrl` to `Control`** — matches Playwright's key naming. `Ctrl` still works internally via `modifierFlags()`
+- **`page.goto/back/forward/reload` — navigation now uses `waitUntil`** — `load` (default), `domcontentloaded`, `networkidle`, `commit`. Plus optional `timeout`. Matches Playwright's `goto({ waitUntil })` pattern
+- **`page.wait` selector — added `state` param** — `visible`, `hidden`, `attached` (default), `detached`. Matches Playwright's `locator.waitFor({ state })`
+
+### Added
+- **`modifiers` on `interact.click` and `interact.hover`** — `["Control", "Shift", "Alt", "Meta"]` for Ctrl+click, Shift+click, etc. Already existed on `press`, now available on click/hover too
+- **`delay` on `interact.type`** — milliseconds between keystrokes for character-by-character typing (like Playwright's `pressSequentially`). Without delay, uses instant fill via `nativeInputValueSetter`
+- **`type` param on `page.screenshot`** — `png` (default) or `jpeg`. JPEG produces smaller files for vision-model agents. Previously jpeg was only triggered by `quality` param
+- **`waitForReadyState` helper** — shared navigation wait logic supporting all 4 `waitUntil` strategies including `networkidle` (waits for no pending requests for 500ms)
+
 ## [4.1.0] — 2026-02-14
 
 ### Added
