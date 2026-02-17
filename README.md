@@ -22,12 +22,18 @@ Every other browser MCP server **launches a fresh browser** — no cookies, no l
 
 **CDP Browser MCP Server connects to your actual running Chrome.** Your Gmail is already open. Your LinkedIn is already logged in. Your corporate SSO just works. No re-authentication, no MFA prompts, no cookie imports.
 
+### Instant Startup — No Browser Launch Overhead
+
+Other browser automation tools need to **launch a browser process** — and that takes time. Puppeteer with 20+ tabs open can take **3–5 minutes** just to initialize. Playwright MCP downloads and installs browser binaries before first run.
+
+CDP Browser MCP Server connects to your **already-running** browser over a WebSocket. Startup is **instantaneous** regardless of how many tabs you have open — 20 tabs or 100 tabs, it connects in milliseconds and starts working immediately. No browser launch, no binary downloads, no cold start penalty.
+
 ### The Problem with Other Approaches
 
 | Approach | What breaks |
 |----------|------------|
-| Playwright MCP launches new browser | No cookies, no sessions, need to re-login everywhere |
-| Puppeteer MCP launches Chromium | Same — blank slate. Plus it's **deprecated** |
+| Playwright MCP launches new browser | No cookies, no sessions, need to re-login everywhere. Downloads browser binaries first |
+| Puppeteer MCP launches Chromium | Same — blank slate. 3–5 min startup with many tabs. Plus it's **deprecated** |
 | Browserbase MCP uses cloud browser | Requires paid subscription + separate LLM API key |
 | Browser Use needs Python + LLM key | Heavy framework, double LLM cost |
 | BrowserTools MCP is read-only | Can observe but can't automate |
@@ -66,6 +72,7 @@ Every other browser MCP server **launches a fresh browser** — no cookies, no l
 | Dependencies | **2** (ws, MCP SDK) | Playwright + browsers | API key + subscription | Puppeteer + Chromium | 3-part install |
 | Single file server | **Yes** (~2900 lines) | Multi-file package | Multi-file package | Multi-file | Multi-file |
 | Status | **Active** | Active | Active | **Deprecated** | Active |
+| Startup speed | **Instant** (WebSocket connect) | Slow (browser launch) | Slow (cloud API) | Slow (3-5 min w/ tabs) | N/A |
 
 ---
 
@@ -208,7 +215,7 @@ The server communicates over stdio using the MCP protocol. Any MCP-compatible cl
 | `snapshot` | Accessibility tree with element refs | `tabId` | — |
 | `screenshot` | Capture page or element as image | `tabId` | `fullPage`, `quality`, `uid` |
 | `content` | Extract text or HTML | `tabId` | `uid`, `selector`, `format` |
-| `wait` | Wait for text, selector, or time | `tabId` | `text`, `textGone`, `selector`, `time`, `timeout` |
+| `wait` | Wait for text, selector, or fixed delay | `tabId` | `text`, `textGone`, `selector`, `time`(sec), `timeout`(ms) |
 | `pdf` | Export page as PDF | `tabId` | `landscape`, `scale`, `paperWidth`, `paperHeight`, `margin` |
 | `dialog` | Handle JS alert/confirm/prompt | `tabId` | `accept`, `text` |
 | `inject` | Inject script on every page load | `tabId`, `script` | — |

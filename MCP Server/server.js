@@ -1063,7 +1063,7 @@ const TOOLS = [
       "- snapshot: Capture accessibility tree snapshot with element refs for interaction (requires: tabId)",
       "- screenshot: Take a screenshot of the page or a specific element (requires: tabId; optional: fullPage, quality, uid)",
       "- content: Extract text or HTML content from the page or an element (requires: tabId; optional: uid, selector, format[text|html])",
-      "- wait: Wait for text to appear/disappear, a CSS selector to match, or a fixed time (requires: tabId; provide one of: text, textGone, selector, or time; optional: timeout)",
+      "- wait: Wait for text to appear/disappear, a CSS selector to match, or a fixed delay (requires: tabId; provide one of: text, textGone, selector, or time; optional: timeout)",
       "- pdf: Export page as PDF to temp file (requires: tabId; optional: landscape, scale, paperWidth, paperHeight, margin{top,bottom,left,right})",
       "- dialog: Handle a pending JavaScript dialog (alert/confirm/prompt) (requires: tabId; optional: accept[default:true], text for prompt response)",
       "- inject: Inject a script that runs on every new document load (requires: tabId, script)",
@@ -1072,7 +1072,9 @@ const TOOLS = [
       "Notes:",
       "- Always take a snapshot before interacting with elements — it provides uid refs needed by interact tools",
       "- The snapshot returns an accessibility tree with roles, names, and properties matching ARIA semantics",
-      "- Wait actions poll every 300ms up to the timeout (default: 10000ms)",
+      "- Wait actions poll every 300ms up to the timeout (default: 10s)
+      - The 'time' param is in SECONDS (e.g. time: 3 = 3 seconds). Max 60 seconds. Values over 60 are treated as milliseconds and auto-converted
+      - The 'timeout' param is in MILLISECONDS — it caps how long to poll for text/selector conditions (default: 10000ms = 10s)",
     ].join("\n"),
     annotations: {
       title: "Page Operations",
@@ -1094,8 +1096,8 @@ const TOOLS = [
         format: { type: "string", enum: ["text", "html"], description: "Content format." },
         text: { type: "string", description: "Text to wait for / dialog prompt text." },
         textGone: { type: "string", description: "Text to wait to disappear." },
-        time: { type: "number", description: "Wait time in seconds." },
-        timeout: { type: "number", description: "Max wait in ms." },
+        time: { type: "number", description: "Fixed wait time in SECONDS (e.g. 3 = 3 seconds, NOT milliseconds). Max 60s. Values >60 are auto-converted from ms." },
+        timeout: { type: "number", description: "Max polling timeout in milliseconds for text/selector waits (default: 10000ms). Not used with 'time'." },
         accept: { type: "boolean", description: "Accept (true) or dismiss (false) dialog." },
         landscape: { type: "boolean", description: "PDF landscape orientation." },
         scale: { type: "number", description: "PDF scale factor." },
@@ -1649,8 +1651,13 @@ async function handlePageContent(args) {
 
 async function handlePageWait(args) {
   if (args.time) {
-    await sleep(args.time * 1000);
-    return ok(`Waited ${args.time} seconds.`);
+    let timeSec = args.time;
+    // Auto-detect: if >60, caller likely passed milliseconds — convert to seconds
+    if (timeSec > 60) timeSec = timeSec / 1000;
+    // Hard cap at 60 seconds to prevent runaway waits
+    timeSec = Math.min(timeSec, 60);
+    await sleep(timeSec * 1000);
+    return ok(`Waited ${timeSec} seconds.${args.time > 60 ? ` (auto-converted from ${args.time}ms)` : ""}`);
   }
   if (!args.selector && !args.text && !args.textGone) {
     return fail("Provide 'text', 'textGone', 'selector', or 'time'.");
