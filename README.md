@@ -213,9 +213,9 @@ The server communicates over stdio using the MCP protocol. Any MCP-compatible cl
 | `forward` | Navigate forward in history | `tabId` | — |
 | `reload` | Reload page | `tabId` | `ignoreCache` |
 | `snapshot` | Accessibility tree with element refs | `tabId` | — |
-| `screenshot` | Capture page or element as image | `tabId` | `fullPage`, `quality`, `uid` |
+| `screenshot` | Capture page or element as image | `tabId` | `fullPage`, `quality`, `uid`, `savePath` |
 | `content` | Extract text or HTML | `tabId` | `uid`, `selector`, `format` |
-| `wait` | Wait for text, selector, or fixed delay | `tabId` | `text`, `textGone`, `selector`, `time`(sec), `timeout`(ms) |
+| `wait` | Wait for text, selector, or fixed delay | `tabId` | `text`, `textGone`, `selector`, `time`(ms), `timeout`(ms) |
 | `pdf` | Export page as PDF | `tabId` | `landscape`, `scale`, `paperWidth`, `paperHeight`, `margin` |
 | `dialog` | Handle JS alert/confirm/prompt | `tabId` | `accept`, `text` |
 | `inject` | Inject script on every page load | `tabId`, `script` | — |

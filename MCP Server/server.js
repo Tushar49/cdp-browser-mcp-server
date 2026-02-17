@@ -1061,7 +1061,7 @@ const TOOLS = [
       "- forward: Navigate forward in browser history (requires: tabId)",
       "- reload: Reload the current page (requires: tabId; optional: ignoreCache)",
       "- snapshot: Capture accessibility tree snapshot with element refs for interaction (requires: tabId)",
-      "- screenshot: Take a screenshot of the page or a specific element (requires: tabId; optional: fullPage, quality, uid)",
+      "- screenshot: Take a screenshot of the page or a specific element (requires: tabId; optional: fullPage, quality, uid, savePath — absolute file path to save to disk)",
       "- content: Extract text or HTML content from the page or an element (requires: tabId; optional: uid, selector, format[text|html])",
       "- wait: Wait for text to appear/disappear, a CSS selector to match, or a fixed delay (requires: tabId; provide one of: text, textGone, selector, or time; optional: timeout)",
       "- pdf: Export page as PDF to temp file (requires: tabId; optional: landscape, scale, paperWidth, paperHeight, margin{top,bottom,left,right})",
@@ -1072,9 +1072,9 @@ const TOOLS = [
       "Notes:",
       "- Always take a snapshot before interacting with elements — it provides uid refs needed by interact tools",
       "- The snapshot returns an accessibility tree with roles, names, and properties matching ARIA semantics",
-      "- Wait actions poll every 300ms up to the timeout (default: 10s)
-      - The 'time' param is in SECONDS (e.g. time: 3 = 3 seconds). Max 60 seconds. Values over 60 are treated as milliseconds and auto-converted
-      - The 'timeout' param is in MILLISECONDS — it caps how long to poll for text/selector conditions (default: 10000ms = 10s)",
+      "- Wait actions poll every 300ms up to the timeout (default: 10000ms)",
+      "- Both 'time' and 'timeout' are in MILLISECONDS (e.g. time: 3000 = 3 seconds). Max time: 60000ms",
+      "- Screenshots: pass 'savePath' (absolute file path) to save the image to disk instead of returning base64",
     ].join("\n"),
     annotations: {
       title: "Page Operations",
@@ -1091,13 +1091,14 @@ const TOOLS = [
         ignoreCache: { type: "boolean", description: "Ignore cache on reload." },
         fullPage: { type: "boolean", description: "Full-page screenshot." },
         quality: { type: "number", description: "JPEG quality 0-100." },
+        savePath: { type: "string", description: "Absolute file path to save screenshot to disk (e.g. 'C:/screenshots/step1.png'). Returns file path instead of base64 image." },
         uid: { type: "number", description: "Element uid for screenshot/content." },
         selector: { type: "string", description: "CSS selector for content/wait." },
         format: { type: "string", enum: ["text", "html"], description: "Content format." },
         text: { type: "string", description: "Text to wait for / dialog prompt text." },
         textGone: { type: "string", description: "Text to wait to disappear." },
-        time: { type: "number", description: "Fixed wait time in SECONDS (e.g. 3 = 3 seconds, NOT milliseconds). Max 60s. Values >60 are auto-converted from ms." },
-        timeout: { type: "number", description: "Max polling timeout in milliseconds for text/selector waits (default: 10000ms). Not used with 'time'." },
+        time: { type: "number", description: "Fixed wait delay in milliseconds (e.g. 3000 = 3 seconds). Max 60000ms (60s)." },
+        timeout: { type: "number", description: "Max polling timeout in milliseconds for text/selector/textGone waits (default: 10000ms)." },
         accept: { type: "boolean", description: "Accept (true) or dismiss (false) dialog." },
         landscape: { type: "boolean", description: "PDF landscape orientation." },
         scale: { type: "number", description: "PDF scale factor." },
@@ -1626,6 +1627,14 @@ async function handlePageScreenshot(args) {
     params.clip = { x: 0, y: 0, width, height, scale: 1 };
   }
   const { data } = await cdp("Page.captureScreenshot", params, sess);
+  // Save to disk if savePath provided
+  if (args.savePath) {
+    const buf = Buffer.from(data, "base64");
+    const dir = args.savePath.replace(/[\\/][^\\/]+$/, "");
+    if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(args.savePath, buf);
+    return ok(`Screenshot saved to: ${args.savePath}\nSize: ${(buf.length / 1024).toFixed(1)} KB`);
+  }
   return { content: [{ type: "image", data, mimeType: params.format === "jpeg" ? "image/jpeg" : "image/png" }] };
 }
 
@@ -1651,13 +1660,10 @@ async function handlePageContent(args) {
 
 async function handlePageWait(args) {
   if (args.time) {
-    let timeSec = args.time;
-    // Auto-detect: if >60, caller likely passed milliseconds — convert to seconds
-    if (timeSec > 60) timeSec = timeSec / 1000;
-    // Hard cap at 60 seconds to prevent runaway waits
-    timeSec = Math.min(timeSec, 60);
-    await sleep(timeSec * 1000);
-    return ok(`Waited ${timeSec} seconds.${args.time > 60 ? ` (auto-converted from ${args.time}ms)` : ""}`);
+    // Everything in milliseconds — cap at 60 seconds
+    const timeMs = Math.min(args.time, 60000);
+    await sleep(timeMs);
+    return ok(`Waited ${timeMs}ms.${args.time > 60000 ? ` (capped from ${args.time}ms)` : ""}`);
   }
   if (!args.selector && !args.text && !args.textGone) {
     return fail("Provide 'text', 'textGone', 'selector', or 'time'.");

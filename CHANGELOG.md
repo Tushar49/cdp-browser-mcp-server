@@ -19,8 +19,10 @@ All notable changes to CDP Browser MCP Server will be documented in this file.
 
 ### Fixed
 - Geolocation spoofing on permission-based sites — `Emulation.setGeolocationOverride` alone wasn't enough; browser permission grants are now handled automatically
-- **`page.wait` time param safety** — values over 60 are auto-detected as milliseconds and converted to seconds; hard cap at 60 seconds prevents runaway waits (e.g. agent sending `time: 3000` thinking it's ms no longer causes a 50-minute wait)
-- Clarified `time` (seconds) vs `timeout` (milliseconds) descriptions in tool schema to prevent unit confusion
+- **`page.wait` time/timeout consistency** — both `time` and `timeout` are now in milliseconds (matching Playwright convention). Hard cap at 60000ms prevents runaway waits
+
+### Added (post-release)
+- **`savePath` param for `page.screenshot`** — pass an absolute file path to save screenshots directly to disk instead of returning base64. Creates parent directories automatically
 
 ## [4.0.0] — 2026-02-14
 
