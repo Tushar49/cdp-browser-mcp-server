@@ -1667,10 +1667,126 @@ async function handlePageScreenshot(args) {
     const r = el;
     params.clip = { x: r.x - r.w / 2, y: r.y - r.h / 2, width: r.w, height: r.h, scale: 1 };
   } else if (args.fullPage) {
+    // Full-page screenshot: temporarily resize viewport to content size (like Playwright),
+    // capture, then restore. This ensures Chrome actually renders all content.
     await ensureDomain(sess, "Page");
     const m = await cdp("Page.getLayoutMetrics", {}, sess);
-    const { width, height } = m.cssContentSize || m.contentSize;
+    let { width, height } = m.cssContentSize || m.contentSize;
+    const viewport = m.cssVisualViewport || m.visualViewport || {};
+    const origWidth = viewport.clientWidth || width;
+    const origHeight = viewport.clientHeight || height;
+
+    // SPA detection: if content height ≈ viewport, the page uses a nested scrollable
+    // container (LinkedIn, Gmail, Twitter). Find it and expand temporarily.
+    let spaExpanded = false;
+    if (height <= origHeight * 1.1) {
+      try {
+        const r = await cdp("Runtime.evaluate", {
+          expression: `(() => {
+            let best = null, bestArea = 0;
+            for (const el of document.querySelectorAll('*')) {
+              const s = getComputedStyle(el);
+              if ((s.overflowY === 'auto' || s.overflowY === 'scroll' || s.overflowY === 'overlay') && el.scrollHeight > el.clientHeight + 50) {
+                const area = el.scrollHeight * el.clientWidth;
+                if (area > bestArea) { bestArea = area; best = el; }
+              }
+            }
+            if (!best) return null;
+            // Mark and expand
+            best.dataset._cdpFullpage = '1';
+            best._origStyles = { maxHeight: best.style.maxHeight, height: best.style.height, overflow: best.style.overflow };
+            best.style.maxHeight = 'none';
+            best.style.height = best.scrollHeight + 'px';
+            best.style.overflow = 'visible';
+            // Also expand any ancestor with overflow hidden/auto that clips it
+            let p = best.parentElement;
+            while (p && p !== document.body) {
+              const ps = getComputedStyle(p);
+              if (ps.overflowY === 'hidden' || ps.overflowY === 'auto' || ps.overflowY === 'scroll') {
+                p.dataset._cdpFullpageParent = '1';
+                p._origStyles = { maxHeight: p.style.maxHeight, height: p.style.height, overflow: p.style.overflow };
+                p.style.maxHeight = 'none';
+                p.style.height = 'auto';
+                p.style.overflow = 'visible';
+              }
+              p = p.parentElement;
+            }
+            return { scrollHeight: best.scrollHeight };
+          })()`,
+          returnByValue: true,
+        }, sess, 5000);
+        if (r.result?.value?.scrollHeight > height) {
+          spaExpanded = true;
+          await sleep(200);
+          // Re-measure
+          const m2 = await cdp("Page.getLayoutMetrics", {}, sess);
+          const c2 = m2.cssContentSize || m2.contentSize;
+          width = c2.width;
+          height = c2.height;
+        }
+      } catch { /* proceed with normal dimensions */ }
+    }
+
+    // Cap at 16384px (Chrome's max texture dimension)
+    const maxDim = 16384;
+    if (height > maxDim) height = maxDim;
+
+    // Temporarily resize viewport to full content dimensions so Chrome renders everything
+    await cdp("Emulation.setDeviceMetricsOverride", {
+      width: Math.ceil(width),
+      height: Math.ceil(height),
+      deviceScaleFactor: viewport.scale || 1,
+      mobile: false,
+    }, sess);
+    await sleep(200); // Let re-layout and paint happen
+
     params.clip = { x: 0, y: 0, width, height, scale: 1 };
+    params.captureBeyondViewport = true;
+    let captureData;
+    try {
+      const result = await cdp("Page.captureScreenshot", params, sess);
+      captureData = result.data;
+    } finally {
+      // Restore original viewport
+      await cdp("Emulation.clearDeviceMetricsOverride", {}, sess).catch(() => {});
+      await sleep(100); // Let viewport restore settle
+
+      // Restore SPA container styles if expanded
+      if (spaExpanded) {
+        await cdp("Runtime.evaluate", {
+          expression: `(() => {
+            const el = document.querySelector('[data-_cdp-fullpage="1"]');
+            if (el && el._origStyles) {
+              el.style.maxHeight = el._origStyles.maxHeight || '';
+              el.style.height = el._origStyles.height || '';
+              el.style.overflow = el._origStyles.overflow || '';
+              delete el._origStyles;
+              delete el.dataset._cdpFullpage;
+            }
+            document.querySelectorAll('[data-_cdp-fullpage-parent="1"]').forEach(p => {
+              if (p._origStyles) {
+                p.style.maxHeight = p._origStyles.maxHeight || '';
+                p.style.height = p._origStyles.height || '';
+                p.style.overflow = p._origStyles.overflow || '';
+                delete p._origStyles;
+                delete p.dataset._cdpFullpageParent;
+              }
+            });
+          })()`,
+        }, sess, 5000).catch(() => {});
+      }
+    }
+
+    // Return the full-page capture
+    const saveTo = args.path || args.savePath;
+    if (saveTo) {
+      const buf = Buffer.from(captureData, "base64");
+      const dir = saveTo.replace(/[\\/][^\\/]+$/, "");
+      if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(saveTo, buf);
+      return ok(`Screenshot saved to: ${saveTo}\nSize: ${(buf.length / 1024).toFixed(1)} KB${spaExpanded ? " (SPA container expanded)" : ""}`);
+    }
+    return { content: [{ type: "image", data: captureData, mimeType: params.format === "jpeg" ? "image/jpeg" : "image/png" }] };
   }
   const { data } = await cdp("Page.captureScreenshot", params, sess);
   // Save to disk if path provided (also accept legacy savePath)
