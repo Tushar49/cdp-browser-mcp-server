@@ -213,7 +213,7 @@ The server communicates over stdio using the MCP protocol. Any MCP-compatible cl
 | `forward` | Navigate forward in history | `tabId` | `waitUntil`, `timeout` |
 | `reload` | Reload page | `tabId` | `ignoreCache`, `waitUntil`, `timeout` |
 | `snapshot` | Accessibility tree with element refs | `tabId` | — |
-| `screenshot` | Capture page or element as image | `tabId` | `fullPage`, `quality`, `uid`, `type`, `path` |
+| `screenshot` | Capture page or element as image (fullPage scrolls SPA containers to trigger lazy loading) | `tabId` | `fullPage`, `quality`, `uid`, `type`, `path` |
 | `content` | Extract text or HTML | `tabId` | `uid`, `selector`, `format` |
 | `wait` | Wait for condition or fixed delay | `tabId` | `text`, `textGone`, `selector`, `state`, `timeout`(ms) |
 | `pdf` | Export page as PDF | `tabId` | `landscape`, `scale`, `paperWidth`, `paperHeight`, `margin` |

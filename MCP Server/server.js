@@ -1667,17 +1667,19 @@ async function handlePageScreenshot(args) {
     const r = el;
     params.clip = { x: r.x - r.w / 2, y: r.y - r.h / 2, width: r.w, height: r.h, scale: 1 };
   } else if (args.fullPage) {
-    // Full-page screenshot: temporarily resize viewport to content size (like Playwright),
-    // capture, then restore. This ensures Chrome actually renders all content.
+    // Full-page screenshot: scroll to trigger lazy loading, expand SPA containers,
+    // resize viewport to full content, capture, then restore everything.
     await ensureDomain(sess, "Page");
     const m = await cdp("Page.getLayoutMetrics", {}, sess);
     let { width, height } = m.cssContentSize || m.contentSize;
     const viewport = m.cssVisualViewport || m.visualViewport || {};
     const origWidth = viewport.clientWidth || width;
     const origHeight = viewport.clientHeight || height;
+    const maxDim = 16384; // Chrome's max GPU texture dimension
 
-    // SPA detection: if content height ≈ viewport, the page uses a nested scrollable
-    // container (LinkedIn, Gmail, Twitter). Find it and expand temporarily.
+    // SPA detection: find the main scrollable container (LinkedIn, Gmail, Twitter use
+    // nested scroll containers instead of document-level scroll).
+    let spaContainer = null;
     let spaExpanded = false;
     if (height <= origHeight * 1.1) {
       try {
@@ -1692,15 +1694,88 @@ async function handlePageScreenshot(args) {
               }
             }
             if (!best) return null;
-            // Mark and expand
             best.dataset._cdpFullpage = '1';
-            best._origStyles = { maxHeight: best.style.maxHeight, height: best.style.height, overflow: best.style.overflow };
-            best.style.maxHeight = 'none';
-            best.style.height = best.scrollHeight + 'px';
-            best.style.overflow = 'visible';
-            // Also expand any ancestor with overflow hidden/auto that clips it
-            let p = best.parentElement;
-            while (p && p !== document.body) {
+            return { scrollHeight: best.scrollHeight, clientHeight: best.clientHeight };
+          })()`,
+          returnByValue: true,
+        }, sess, 5000);
+        if (r.result?.value) spaContainer = r.result.value;
+      } catch { /* proceed without SPA detection */ }
+    }
+
+    // Step 1: Scroll through the page BEFORE expanding to trigger lazy loading.
+    // Must scroll inside the SPA container (while it's still scrollable) or window.
+    // Safeguard: cap at 30 scroll steps AND track if content keeps growing (infinite scroll).
+    // For infinite scroll pages, we stop once height stabilizes or exceeds maxDim.
+    const scrollTarget = spaContainer ? 'spa' : (height > origHeight * 1.2 ? 'window' : null);
+    const totalHeight = spaContainer ? spaContainer.scrollHeight : height;
+
+    if (scrollTarget && totalHeight > origHeight * 1.2) {
+      try {
+        let prevHeight = totalHeight;
+        const maxScrollSteps = 30; // cap to prevent runaway on infinite scroll
+        const step = origHeight;
+        let scrolls = Math.min(Math.ceil(totalHeight / step), maxScrollSteps);
+        for (let i = 1; i <= scrolls; i++) {
+          const scrollY = Math.min(i * step, prevHeight);
+          if (scrollTarget === 'spa') {
+            await cdp("Runtime.evaluate", {
+              expression: `document.querySelector('[data-_cdp-fullpage="1"]').scrollTop = ${scrollY}`,
+              returnByValue: true,
+            }, sess, 3000);
+          } else {
+            await cdp("Runtime.evaluate", {
+              expression: `window.scrollTo(0, ${scrollY})`,
+              returnByValue: true,
+            }, sess, 3000);
+          }
+          await sleep(250);
+          // Every 5 steps, check if content is growing (infinite scroll detection)
+          if (i % 5 === 0 && i < scrolls) {
+            const check = await cdp("Runtime.evaluate", {
+              expression: scrollTarget === 'spa'
+                ? `document.querySelector('[data-_cdp-fullpage="1"]').scrollHeight`
+                : `Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)`,
+              returnByValue: true,
+            }, sess, 3000);
+            const newH = check.result?.value || prevHeight;
+            if (newH > prevHeight * 1.5 || newH > maxDim) {
+              // Content is growing rapidly (infinite scroll) — stop and use what we have
+              break;
+            }
+            if (newH > prevHeight) {
+              prevHeight = newH;
+              scrolls = Math.min(Math.ceil(prevHeight / step), maxScrollSteps);
+            }
+          }
+        }
+        // Scroll back to top
+        if (scrollTarget === 'spa') {
+          await cdp("Runtime.evaluate", {
+            expression: `document.querySelector('[data-_cdp-fullpage="1"]').scrollTop = 0`,
+            returnByValue: true,
+          }, sess, 3000);
+        } else {
+          await cdp("Runtime.evaluate", { expression: `window.scrollTo(0, 0)`, returnByValue: true }, sess, 3000);
+        }
+        await sleep(200);
+      } catch { /* proceed */ }
+    }
+
+    // Step 2: Now expand the SPA container for capture (after lazy content has loaded)
+    if (spaContainer) {
+      try {
+        const r = await cdp("Runtime.evaluate", {
+          expression: `(() => {
+            const el = document.querySelector('[data-_cdp-fullpage="1"]');
+            if (!el) return null;
+            el._origStyles = { maxHeight: el.style.maxHeight, height: el.style.height, overflow: el.style.overflow };
+            el.style.maxHeight = 'none';
+            el.style.height = el.scrollHeight + 'px';
+            el.style.overflow = 'visible';
+            // Expand ancestors that clip with overflow
+            let p = el.parentElement;
+            while (p && p !== document.body && p !== document.documentElement) {
               const ps = getComputedStyle(p);
               if (ps.overflowY === 'hidden' || ps.overflowY === 'auto' || ps.overflowY === 'scroll') {
                 p.dataset._cdpFullpageParent = '1';
@@ -1711,34 +1786,38 @@ async function handlePageScreenshot(args) {
               }
               p = p.parentElement;
             }
-            return { scrollHeight: best.scrollHeight };
+            // Also handle body overflow:hidden (common in SPAs)
+            if (getComputedStyle(document.body).overflow === 'hidden' || getComputedStyle(document.body).overflowY === 'hidden') {
+              document.body.dataset._cdpFullpageParent = '1';
+              document.body._origStyles = { overflow: document.body.style.overflow, overflowY: document.body.style.overflowY };
+              document.body.style.overflow = 'visible';
+            }
+            return { scrollHeight: el.scrollHeight };
           })()`,
           returnByValue: true,
         }, sess, 5000);
-        if (r.result?.value?.scrollHeight > height) {
+        if (r.result?.value?.scrollHeight) {
           spaExpanded = true;
           await sleep(200);
-          // Re-measure
+          // Re-measure with expansion
           const m2 = await cdp("Page.getLayoutMetrics", {}, sess);
           const c2 = m2.cssContentSize || m2.contentSize;
           width = c2.width;
           height = c2.height;
         }
-      } catch { /* proceed with normal dimensions */ }
+      } catch { /* proceed */ }
     }
 
-    // Cap at 16384px (Chrome's max texture dimension)
-    const maxDim = 16384;
     if (height > maxDim) height = maxDim;
 
-    // Temporarily resize viewport to full content dimensions so Chrome renders everything
+    // Step 3: Resize viewport to full content so Chrome renders everything
     await cdp("Emulation.setDeviceMetricsOverride", {
       width: Math.ceil(width),
       height: Math.ceil(height),
       deviceScaleFactor: viewport.scale || 1,
       mobile: false,
     }, sess);
-    await sleep(200); // Let re-layout and paint happen
+    await sleep(400); // Let full re-layout and paint happen
 
     params.clip = { x: 0, y: 0, width, height, scale: 1 };
     params.captureBeyondViewport = true;
@@ -1751,26 +1830,29 @@ async function handlePageScreenshot(args) {
       await cdp("Emulation.clearDeviceMetricsOverride", {}, sess).catch(() => {});
       await sleep(100); // Let viewport restore settle
 
-      // Restore SPA container styles if expanded
-      if (spaExpanded) {
+      // Restore SPA container styles and clean up markers
+      if (spaContainer) {
         await cdp("Runtime.evaluate", {
           expression: `(() => {
             const el = document.querySelector('[data-_cdp-fullpage="1"]');
-            if (el && el._origStyles) {
-              el.style.maxHeight = el._origStyles.maxHeight || '';
-              el.style.height = el._origStyles.height || '';
-              el.style.overflow = el._origStyles.overflow || '';
-              delete el._origStyles;
+            if (el) {
+              if (el._origStyles) {
+                el.style.maxHeight = el._origStyles.maxHeight || '';
+                el.style.height = el._origStyles.height || '';
+                el.style.overflow = el._origStyles.overflow || '';
+                delete el._origStyles;
+              }
               delete el.dataset._cdpFullpage;
             }
             document.querySelectorAll('[data-_cdp-fullpage-parent="1"]').forEach(p => {
               if (p._origStyles) {
-                p.style.maxHeight = p._origStyles.maxHeight || '';
-                p.style.height = p._origStyles.height || '';
-                p.style.overflow = p._origStyles.overflow || '';
+                if (p._origStyles.overflow !== undefined) p.style.overflow = p._origStyles.overflow || '';
+                if (p._origStyles.overflowY !== undefined) p.style.overflowY = p._origStyles.overflowY || '';
+                if (p._origStyles.maxHeight !== undefined) p.style.maxHeight = p._origStyles.maxHeight || '';
+                if (p._origStyles.height !== undefined) p.style.height = p._origStyles.height || '';
                 delete p._origStyles;
-                delete p.dataset._cdpFullpageParent;
               }
+              delete p.dataset._cdpFullpageParent;
             });
           })()`,
         }, sess, 5000).catch(() => {});
@@ -3242,7 +3324,7 @@ function appendConsoleErrors(result, tabId) {
 // ─── MCP Server Setup ───────────────────────────────────────────────
 
 const server = new Server(
-  { name: "cdp-browser", version: "4.1.0" },
+  { name: "cdp-browser", version: "4.2.1" },
   { capabilities: { tools: {} } }
 );
 

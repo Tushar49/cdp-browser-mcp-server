@@ -2,6 +2,27 @@
 
 All notable changes to CDP Browser MCP Server will be documented in this file.
 
+## [4.2.1] — 2026-02-18
+
+### Fixed — Full-Page Screenshots on SPA Pages
+
+Full-page screenshots on SPA sites (LinkedIn, Gmail, Twitter) now correctly capture **all loaded content** instead of blank space or skeleton placeholders.
+
+### Fixed
+- **Scroll-before-expand strategy** — scrolls through the SPA scroll container *while it's still scrollable* to trigger lazy loading, then expands it for capture. Previously expanded first (disabling scroll), so lazy content never loaded
+- **Body overflow handling** — now also overrides `body { overflow: hidden }` which LinkedIn and other SPAs use to prevent document-level scroll
+- **Infinite scroll safeguards** — capped at 30 scroll steps; monitors content growth every 5 steps and aborts if height exceeds 1.5x (runaway infinite scroll) or 16384px (Chrome GPU limit)
+- **Post-capture stability** — increased settle times after viewport resize/restore to prevent timeout on subsequent screenshots
+
+### Test Results
+| Page | Viewport | Full Page |
+|------|----------|----------|
+| LinkedIn Profile | 1920×804 (105 KB) | 1536×4231 (709 KB) |
+| LinkedIn Notifications | 1920×804 (161 KB) | 1520×1150 (128 KB) |
+| Wikipedia article | 1920×804 | 1520×6044 (1064 KB) |
+
+---
+
 ## [4.2.0] — 2026-02-14
 
 ### Playwright Alignment — Comprehensive API Audit & Improvements
