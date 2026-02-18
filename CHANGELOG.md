@@ -2,6 +2,17 @@
 
 All notable changes to CDP Browser MCP Server will be documented in this file.
 
+## [4.2.2] — 2026-02-18
+
+### Changed — Temp directory moved to repo-local `.temp/`
+
+- Temp files (PDFs, large outputs) now stored in `<repo>/.temp/` instead of system temp (`%TEMP%\.cdp-mcp\`)
+- Path resolved via `import.meta.url` — works regardless of where the server is invoked from
+- Override with `CDP_TEMP_DIR` env var if needed
+- `.temp/` added to `.gitignore`
+
+---
+
 ## [4.2.1] — 2026-02-18
 
 ### Fixed — Full-Page Screenshots on SPA Pages

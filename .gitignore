@@ -4,6 +4,7 @@ node_modules/
 # Temp files
 temp/
 tmp/
+.temp/
 .playwright-mcp/
 
 # Prompts / planning docs

@@ -37,8 +37,8 @@ import {
 import WebSocket from "ws";
 import { randomUUID } from "crypto";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, readdirSync, statSync } from "fs";
-import { join } from "path";
-import { tmpdir } from "os";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 
 // ─── Config ─────────────────────────────────────────────────────────
 
@@ -48,7 +48,10 @@ const CDP_TIMEOUT = parseInt(process.env.CDP_TIMEOUT || "30000");
 const SESSION_TTL = parseInt(process.env.CDP_SESSION_TTL) || 300000;
 const LONG_TIMEOUT = 120_000;
 const MAX_INLINE_LEN = 60_000;
-const TEMP_DIR = join(tmpdir(), ".cdp-mcp");
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const REPO_ROOT = dirname(__dirname); // up from MCP Server/ to repo root
+const TEMP_DIR = process.env.CDP_TEMP_DIR || join(REPO_ROOT, ".temp");
 
 // ─── Temp File Management ───────────────────────────────────────────
 
@@ -3324,7 +3327,7 @@ function appendConsoleErrors(result, tabId) {
 // ─── MCP Server Setup ───────────────────────────────────────────────
 
 const server = new Server(
-  { name: "cdp-browser", version: "4.2.1" },
+  { name: "cdp-browser", version: "4.2.2" },
   { capabilities: { tools: {} } }
 );
 
