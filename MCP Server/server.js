@@ -693,6 +693,11 @@ function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
+function randomDelay(baseMs) {
+  // Returns random value in range [baseMs, baseMs * 3]
+  return baseMs + Math.random() * (baseMs * 2);
+}
+
 /**
  * Wait for page ready state based on waitUntil strategy (like Playwright):
  * - "load": document.readyState === "complete" (default)
@@ -1164,7 +1169,7 @@ const TOOLS = [
       "Operations:",
       "- click: Click an element (requires: tabId, uid or selector; optional: button[left|right|middle], clickCount — use 2 for double-click, modifiers[Control|Shift|Alt|Meta])",
       "- hover: Hover over an element to trigger tooltips or menus (requires: tabId, uid or selector; optional: modifiers[Control|Shift|Alt|Meta])",
-      "- type: Type text into a focused input field (requires: tabId, text, uid or selector; optional: clear[default:true] — clears field first, submit — press Enter after typing, delay — ms between keystrokes for char-by-char typing)",
+      "- type: Type text into a focused input field (requires: tabId, text, uid or selector; optional: clear[default:true] — clears field first, submit — press Enter after typing, delay — fixed ms between keystrokes, charDelay — base ms between chars with randomized range [base, base*3] default 200ms, wordDelay — base ms between words with randomized range [base, base*3] default 800ms)",
       "- fill: Fill multiple form fields in one call (requires: tabId, fields — array of {uid or selector, value, type[text|checkbox|radio|select]})",
       "- select: Select an option from a <select> dropdown by value or visible text (requires: tabId, value, uid or selector)",
       "- press: Press a keyboard key with optional modifiers (requires: tabId, key; optional: modifiers[Control|Shift|Alt|Meta])",
@@ -1201,6 +1206,8 @@ const TOOLS = [
         value: { type: "string", description: "Value for select action." },
         key: { type: "string", description: "Key for press action." },
         delay: { type: "number", description: "Delay in ms between keystrokes for type action (enables char-by-char typing like Playwright's pressSequentially)." },
+        charDelay: { type: "number", description: "Base delay in ms between characters within a word for human-like typing. Actual delay randomized in [charDelay, charDelay*3]. Default 200ms. Activates human-like mode." },
+        wordDelay: { type: "number", description: "Base delay in ms between words (spaces/newlines) for human-like typing. Actual delay randomized in [wordDelay, wordDelay*3]. Default 800ms." },
         sourceUid: { type: "number", description: "Drag source uid." },
         sourceSelector: { type: "string", description: "Drag source selector." },
         targetUid: { type: "number", description: "Drag target uid." },
@@ -2153,8 +2160,28 @@ async function handleInteractType(args) {
   if (focused.result.value?.error) return fail(focused.result.value.error);
 
   const { networkEvents } = await waitForCompletion(sess, async () => {
-    if (args.delay && args.delay > 0) {
-      // Character-by-character typing with delay (like Playwright's pressSequentially)
+    if (args.charDelay || args.wordDelay) {
+      // Human-like typing: randomized per-char and per-word delays
+      const charBase = args.charDelay || 200;
+      const wordBase = args.wordDelay || 800;
+
+      for (const char of args.text) {
+        await cdp("Input.dispatchKeyEvent", { type: "keyDown", text: char, key: char, unmodifiedText: char }, sess);
+        await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: char }, sess);
+
+        if (char === ' ' || char === '\t') {
+          // Word boundary — longer pause
+          await sleep(randomDelay(wordBase));
+        } else if (char === '\n') {
+          // Newline — use word delay (natural pause at line breaks)
+          await sleep(randomDelay(wordBase));
+        } else {
+          // Regular character within a word
+          await sleep(randomDelay(charBase));
+        }
+      }
+    } else if (args.delay && args.delay > 0) {
+      // Legacy: fixed delay per keystroke (backward compatible)
       for (const char of args.text) {
         await cdp("Input.dispatchKeyEvent", { type: "keyDown", text: char, key: char, unmodifiedText: char }, sess);
         await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: char }, sess);

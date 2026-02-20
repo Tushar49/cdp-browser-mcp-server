@@ -2,6 +2,28 @@
 
 All notable changes to CDP Browser MCP Server will be documented in this file.
 
+## [4.3.0] — 2026-02-20
+
+### Added — Human-Like Typing with Word-Aware Delays
+
+New `charDelay` and `wordDelay` parameters for the `interact` tool's `type` action enable randomized, human-like typing with separate control for character-level and word-level pauses.
+
+### Added
+- **`charDelay` parameter** — base delay in ms between characters within a word, randomized in range `[charDelay, charDelay*3]` (default 200ms)
+- **`wordDelay` parameter** — base delay in ms between words (spaces, tabs, newlines), randomized in range `[wordDelay, wordDelay*3]` (default 800ms)
+- **`randomDelay()` helper** — generates randomized delays in `[base, base*3]` range for natural typing variance
+- Either `charDelay` or `wordDelay` activates human-like mode; omitted param uses its default
+- Existing `delay` parameter unchanged for backward compatibility (fixed delay, no randomization)
+- If both `delay` and `charDelay`/`wordDelay` are provided, human-like mode takes precedence
+
+### Example
+```json
+{ "action": "type", "tabId": "ABC", "uid": 42, "text": "Hello world", "charDelay": 70, "wordDelay": 1500 }
+```
+Types each character with 70–210ms delay, each space with 1500–4500ms delay.
+
+---
+
 ## [4.2.2] — 2026-02-18
 
 ### Changed — Temp directory moved to repo-local `.temp/`

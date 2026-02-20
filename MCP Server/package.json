@@ -1,6 +1,6 @@
 {
   "name": "cdp-mcp-server",
-  "version": "4.2.2",
+  "version": "4.3.0",
   "description": "Lightweight MCP server for Chrome DevTools Protocol — lazy per-tab connections, no full browser enumeration",
   "type": "module",
   "main": "server.js",
