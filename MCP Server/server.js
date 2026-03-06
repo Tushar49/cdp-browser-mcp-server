@@ -1013,6 +1013,12 @@ async function withRetry(fn, { timeout = 5000, interval = 200 } = {}) {
     try { return await fn(); }
     catch (e) {
       lastError = e;
+      // Fast-fail on errors that will never recover with retries:
+      // - Stale uid refs require a new snapshot (refMaps is static between snapshots)
+      // - Missing input params are user errors, not transient failures
+      const msg = e.message || "";
+      if (msg.includes("ref=") && msg.includes("not found")) throw e;
+      if (msg.includes("Provide either")) throw e;
       if (Date.now() + interval > deadline) throw lastError;
       await sleep(interval);
     }
@@ -2407,8 +2413,12 @@ async function handleInteractType(args) {
   if (!args.text) return fail("Provide 'text' to type.");
   const sess = await getTabSession(args.tabId);
   const retryTimeout = args.timeout || 5000;
-  await withRetry(() => checkActionability(sess, args.uid, args.selector), { timeout: retryTimeout });
-  const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
+  // Bundle actionability + object resolution in one retry block to avoid race conditions
+  // (page re-render between the two calls would crash resolveElementObjectId)
+  const objectId = await withRetry(async () => {
+    await checkActionability(sess, args.uid, args.selector);
+    return resolveElementObjectId(sess, args.uid, args.selector);
+  }, { timeout: retryTimeout });
   const clearCode = args.clear !== false
     ? `if ('value' in this) {
         const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
@@ -2496,8 +2506,11 @@ async function handleInteractFill(args) {
   const { networkEvents } = await waitForCompletion(sess, async () => {
     for (const field of args.fields) {
       try {
-        await withRetry(() => checkActionability(sess, field.uid, field.selector), { timeout: retryTimeout });
-        const objectId = await resolveElementObjectId(sess, field.uid, field.selector);
+        // Bundle actionability + object resolution in one retry block
+        const objectId = await withRetry(async () => {
+          await checkActionability(sess, field.uid, field.selector);
+          return resolveElementObjectId(sess, field.uid, field.selector);
+        }, { timeout: retryTimeout });
         const fieldType = field.type || "text";
         const r = await cdp("Runtime.callFunctionOn", {
           functionDeclaration: `function() {
@@ -2552,8 +2565,11 @@ async function handleInteractSelect(args) {
   if (!args.value) return fail("Provide 'value' to select.");
   const sess = await getTabSession(args.tabId);
   const retryTimeout = args.timeout || 5000;
-  await withRetry(() => checkActionability(sess, args.uid, args.selector), { timeout: retryTimeout });
-  const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
+  // Bundle actionability + object resolution in one retry block to avoid race conditions
+  const objectId = await withRetry(async () => {
+    await checkActionability(sess, args.uid, args.selector);
+    return resolveElementObjectId(sess, args.uid, args.selector);
+  }, { timeout: retryTimeout });
 
   const { networkEvents } = await waitForCompletion(sess, async () => {
     const result = await cdp("Runtime.callFunctionOn", {
@@ -2763,8 +2779,11 @@ async function handleInteractCheck(args) {
   if (args.checked === undefined) return fail("Provide 'checked' (true/false).");
   const sess = await getTabSession(args.tabId);
   const retryTimeout = args.timeout || 5000;
-  await withRetry(() => checkActionability(sess, args.uid, args.selector), { timeout: retryTimeout });
-  const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
+  // Bundle actionability + object resolution in one retry block to avoid race conditions
+  const objectId = await withRetry(async () => {
+    await checkActionability(sess, args.uid, args.selector);
+    return resolveElementObjectId(sess, args.uid, args.selector);
+  }, { timeout: retryTimeout });
 
   const { networkEvents } = await waitForCompletion(sess, async () => {
     const result = await cdp("Runtime.callFunctionOn", {
@@ -2794,6 +2813,9 @@ async function handleInteractTap(args) {
   const sess = await getTabSession(args.tabId);
   const retryTimeout = args.timeout || 5000;
   const el = await withRetry(() => checkActionability(sess, args.uid, args.selector), { timeout: retryTimeout });
+
+  // Auto-enable touch emulation — required for Input.dispatchTouchEvent to work
+  try { await cdp("Emulation.setTouchEmulationEnabled", { enabled: true }, sess); } catch { /* ok */ }
 
   const { networkEvents } = await waitForCompletion(sess, async () => {
     await cdp("Input.dispatchTouchEvent", {
