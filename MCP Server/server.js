@@ -815,6 +815,81 @@ function randomDelay(baseMs) {
 }
 
 /**
+ * Generate a natural-looking mouse path using a randomized cubic bezier curve.
+ * Includes slight overshoot, speed variation, and jitter for anti-detection.
+ * @param {{x,y}} from - start point
+ * @param {{x,y}} to - end point
+ * @param {number} [steps=20] - number of intermediate points
+ * @param {number} [jitter=2] - max random pixel offset per point
+ * @returns {{x:number, y:number}[]} array of {x, y} points along the path
+ */
+function generateBezierPath(from, to, steps = 20, jitter = 2) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  // Control point spread scales with distance
+  const spread = Math.min(dist * 0.3, 100);
+  const cp1 = {
+    x: from.x + dx * 0.2 + (Math.random() - 0.5) * spread,
+    y: from.y + dy * 0.2 + (Math.random() - 0.5) * spread,
+  };
+  const cp2 = {
+    x: from.x + dx * 0.8 + (Math.random() - 0.5) * spread,
+    y: from.y + dy * 0.8 + (Math.random() - 0.5) * spread,
+  };
+  // Slight overshoot past target
+  const overshoot = 3 + Math.random() * 5;
+  const angle = Math.atan2(dy, dx);
+  const overshootTarget = {
+    x: to.x + Math.cos(angle) * overshoot,
+    y: to.y + Math.sin(angle) * overshoot,
+  };
+  const points = [];
+  // Phase 1: Move to overshoot point (80% of steps)
+  const mainSteps = Math.round(steps * 0.8);
+  for (let i = 0; i <= mainSteps; i++) {
+    const t = i / mainSteps;
+    const mt = 1 - t;
+    const x = mt*mt*mt * from.x + 3*mt*mt*t * cp1.x + 3*mt*t*t * cp2.x + t*t*t * overshootTarget.x;
+    const y = mt*mt*mt * from.y + 3*mt*mt*t * cp1.y + 3*mt*t*t * cp2.y + t*t*t * overshootTarget.y;
+    const jitterScale = Math.sin(t * Math.PI);
+    points.push({
+      x: x + (Math.random() - 0.5) * jitter * jitterScale,
+      y: y + (Math.random() - 0.5) * jitter * jitterScale,
+    });
+  }
+  // Phase 2: Correction from overshoot back to actual target
+  const corrSteps = steps - mainSteps;
+  for (let i = 1; i <= corrSteps; i++) {
+    const t = i / corrSteps;
+    points.push({
+      x: overshootTarget.x + (to.x - overshootTarget.x) * t + (Math.random() - 0.5) * jitter * 0.3,
+      y: overshootTarget.y + (to.y - overshootTarget.y) * t + (Math.random() - 0.5) * jitter * 0.3,
+    });
+  }
+  return points;
+}
+
+// ─── QWERTY Keyboard Neighbors (for typo simulation) ───────────────
+
+const QWERTY_NEIGHBORS = {
+  q: "wa", w: "qeas", e: "wrds", r: "etfs", t: "rygs", y: "tuhj",
+  u: "yijk", i: "uokl", o: "iplm", p: "ol",
+  a: "qwsz", s: "weadxz", d: "ersfxc", f: "rtdgcv", g: "tyfhvb",
+  h: "yugjbn", j: "uihknm", k: "iojlm", l: "opk",
+  z: "asx", x: "zsdc", c: "xdfv", v: "cfgb", b: "vghn",
+  n: "bhjm", m: "njk",
+};
+
+function getAdjacentKey(char) {
+  const lower = char.toLowerCase();
+  const neighbors = QWERTY_NEIGHBORS[lower];
+  if (!neighbors) return char;
+  const picked = neighbors[Math.floor(Math.random() * neighbors.length)];
+  return char === char.toUpperCase() ? picked.toUpperCase() : picked;
+}
+
+/**
  * Wait for page ready state based on waitUntil strategy (like Playwright):
  * - "load": document.readyState === "complete" (default)
  * - "domcontentloaded": document.readyState !== "loading"
@@ -1337,6 +1412,10 @@ const TOOLS = [
       "",
       "Auto-retry: All actions automatically retry element resolution and actionability checks until the element is found+actionable or timeout expires (default: 5000ms). Use 'timeout' to customize.",
       "",
+      "Human-like mode: Set humanMode: true for realistic mouse paths (bezier curves, overshoot, jitter). Works with click, hover, drag. Combine with charDelay/wordDelay + typoRate for human typing.",
+      "",
+      "Auto-snapshot: Set autoSnapshot: true to get a before/after diff appended to the action response \u2014 shows what changed without a separate snapshot call.",
+      "",
       "Keys for press: Enter, Tab, Escape, Backspace, Delete, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Home, End, PageUp, PageDown, Space, F1-F12, Insert",
     ].join("\n"),
     annotations: {
@@ -1375,6 +1454,9 @@ const TOOLS = [
         files: { type: "array", items: { type: "string" }, description: "File paths for upload." },
         checked: { type: "boolean", description: "Desired checked state for check action." },
         timeout: { type: "number", description: "Retry timeout in ms for element resolution and actionability (default: 5000ms). Element is polled until found+actionable or timeout." },
+        humanMode: { type: "boolean", description: "Enable human-like interaction: bezier curve mouse paths with overshoot and jitter for click/hover/drag. Combine with typoRate for typing." },
+        autoSnapshot: { type: "boolean", description: "Take accessibility snapshots before and after the action, return a diff of changes. Shows what changed without a separate snapshot call." },
+        typoRate: { type: "number", description: "Probability of typing a wrong character then correcting (0-1, e.g. 0.03 = 3% per char). Requires charDelay or wordDelay to be set." },
         sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
         cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs, 'detach' keeps them, 'none' skips cleanup. Sticky per session." },
         exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
@@ -2346,11 +2428,31 @@ async function handleInteractClick(args) {
   const mods = modifierFlags(args.modifiers);
 
   const { networkEvents } = await waitForCompletion(sess, async () => {
-    await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: el.x, y: el.y, modifiers: mods }, sess);
-    await sleep(50);
+    if (args.humanMode) {
+      // Human-like: bezier curve mouse path with overshoot and jitter
+      const startX = args._agentSession?.lastMouseX || 0;
+      const startY = args._agentSession?.lastMouseY || 0;
+      const path = generateBezierPath({ x: startX, y: startY }, { x: el.x, y: el.y });
+      for (let i = 0; i < path.length; i++) {
+        await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: path[i].x, y: path[i].y, modifiers: mods }, sess);
+        const progress = i / path.length;
+        const delay = progress > 0.7 ? 15 + Math.random() * 20 : 5 + Math.random() * 10;
+        await sleep(delay);
+      }
+      await sleep(30 + Math.random() * 50); // pre-click hesitation
+    } else {
+      await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: el.x, y: el.y, modifiers: mods }, sess);
+      await sleep(50);
+    }
     await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x: el.x, y: el.y, button, clickCount: clicks, buttons, modifiers: mods }, sess);
     await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x: el.x, y: el.y, button, clickCount: clicks, modifiers: mods }, sess);
   });
+
+  // Track last mouse position for subsequent humanMode calls
+  if (args._agentSession) {
+    args._agentSession.lastMouseX = el.x;
+    args._agentSession.lastMouseY = el.y;
+  }
 
   // Smart JS click fallback: if the element is a web component or popup trigger
   // and the CDP mouse events didn't change its state, dispatch element.click() via JS.
@@ -2405,8 +2507,23 @@ async function handleInteractHover(args) {
   const retryTimeout = args.timeout || 5000;
   const el = await withRetry(() => resolveElement(sess, args.uid, args.selector), { timeout: retryTimeout });
   const mods = modifierFlags(args.modifiers);
-  await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: el.x, y: el.y, modifiers: mods }, sess);
-  return ok(`Hovering over <${el.tag}> "${el.label}" at (${Math.round(el.x)}, ${Math.round(el.y)})`);
+  if (args.humanMode) {
+    const startX = args._agentSession?.lastMouseX || 0;
+    const startY = args._agentSession?.lastMouseY || 0;
+    const path = generateBezierPath({ x: startX, y: startY }, { x: el.x, y: el.y });
+    for (const pt of path) {
+      await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: pt.x, y: pt.y, modifiers: mods }, sess);
+      await sleep(5 + Math.random() * 15);
+    }
+  } else {
+    await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: el.x, y: el.y, modifiers: mods }, sess);
+  }
+  // Track last mouse position
+  if (args._agentSession) {
+    args._agentSession.lastMouseX = el.x;
+    args._agentSession.lastMouseY = el.y;
+  }
+  return ok(`Hovering over <${el.tag}> "${el.label}" at (${Math.round(el.x)}, ${Math.round(el.y)})${args.humanMode ? " (human path)" : ""}`);
 }
 
 async function handleInteractType(args) {
@@ -2442,6 +2559,18 @@ async function handleInteractType(args) {
       const wordBase = args.wordDelay || 800;
 
       for (const char of args.text) {
+        // Typo simulation: occasionally type wrong char then backspace-correct
+        if (args.typoRate && args.typoRate > 0 && Math.random() < args.typoRate && char.match(/[a-zA-Z]/)) {
+          const wrongChar = getAdjacentKey(char);
+          await cdp("Input.dispatchKeyEvent", { type: "keyDown", text: wrongChar, key: wrongChar, unmodifiedText: wrongChar }, sess);
+          await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: wrongChar }, sess);
+          await sleep(randomDelay(charBase * 2)); // pause — "noticing" the mistake
+          const bk = resolveKey("Backspace");
+          await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: bk.key, code: bk.code, windowsVirtualKeyCode: bk.keyCode, nativeVirtualKeyCode: bk.keyCode }, sess);
+          await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: bk.key, code: bk.code, windowsVirtualKeyCode: bk.keyCode, nativeVirtualKeyCode: bk.keyCode }, sess);
+          await sleep(randomDelay(charBase * 0.5)); // quick correction
+        }
+
         await cdp("Input.dispatchKeyEvent", { type: "keyDown", text: char, key: char, unmodifiedText: char }, sess);
         await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: char }, sess);
 
@@ -2680,15 +2809,28 @@ async function handleInteractDrag(args) {
   await sleep(50);
   await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x: src.x, y: src.y, button: "left", clickCount: 1 }, sess);
   await sleep(100);
-  const steps = 10;
-  for (let i = 1; i <= steps; i++) {
-    const px = src.x + (tgt.x - src.x) * (i / steps);
-    const py = src.y + (tgt.y - src.y) * (i / steps);
-    await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: px, y: py }, sess);
-    await sleep(20);
+  if (args.humanMode) {
+    const path = generateBezierPath({ x: src.x, y: src.y }, { x: tgt.x, y: tgt.y }, 25, 3);
+    for (const pt of path) {
+      await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: pt.x, y: pt.y }, sess);
+      await sleep(10 + Math.random() * 15);
+    }
+  } else {
+    const steps = 10;
+    for (let i = 1; i <= steps; i++) {
+      const px = src.x + (tgt.x - src.x) * (i / steps);
+      const py = src.y + (tgt.y - src.y) * (i / steps);
+      await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: px, y: py }, sess);
+      await sleep(20);
+    }
   }
   await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x: tgt.x, y: tgt.y, button: "left", clickCount: 1 }, sess);
-  return ok(`Dragged <${src.tag}> "${src.label}" → <${tgt.tag}> "${tgt.label}"`);
+  // Track last mouse position
+  if (args._agentSession) {
+    args._agentSession.lastMouseX = tgt.x;
+    args._agentSession.lastMouseY = tgt.y;
+  }
+  return ok(`Dragged <${src.tag}> "${src.label}" → <${tgt.tag}> "${tgt.label}"${args.humanMode ? " (human path)" : ""}`);
 }
 
 async function handleInteractScroll(args) {
@@ -3827,6 +3969,17 @@ async function handleTool(name, args) {
     }
   }
 
+  // ── Auto-snapshot: capture before-snapshot if requested ──
+  let _beforeSnapshot = null;
+  if (name === "interact" && args.autoSnapshot && args.tabId) {
+    try {
+      const snapSess = activeSessions.get(args.tabId);
+      if (snapSess) {
+        _beforeSnapshot = await buildSnapshot(snapSess);
+      }
+    } catch { /* ok — will just skip the diff */ }
+  }
+
   let result;
   // Single-function handler (emulate)
   if (typeof handler === "function") {
@@ -3846,6 +3999,31 @@ async function handleTool(name, args) {
       return fail(`Unknown action '${action}' for tool '${name}'. Available: ${Object.keys(handler).join(", ")}`);
     }
     result = await fn(args);
+  }
+
+  // ── Auto-snapshot: capture after-snapshot and append diff ──
+  if (_beforeSnapshot && args.tabId && result && !result.isError) {
+    try {
+      const afterSess = activeSessions.get(args.tabId);
+      if (afterSess) {
+        const afterSnap = await buildSnapshot(afterSess);
+        let snapInfo = "";
+        if (_beforeSnapshot.url !== afterSnap.url) {
+          snapInfo = `\n\n### Navigation Detected\n${_beforeSnapshot.url} \u2192 ${afterSnap.url}\n\n### New Page Snapshot\n${afterSnap.snapshot}`;
+        } else {
+          const diff = computeSnapshotDiff(_beforeSnapshot.snapshot.split("\n"), afterSnap.snapshot.split("\n"));
+          if (diff.changed && diff.lines.length > 0) {
+            snapInfo = `\n\n### Snapshot Changes (${diff.added} added, ${diff.removed} removed)\n${diff.lines.join("\n")}`;
+          } else {
+            snapInfo = "\n\n### No visible changes detected";
+          }
+        }
+        if (result.content?.[0]?.type === "text") {
+          result.content[0].text += snapInfo;
+        }
+        lastSnapshots.set(afterSess, { snapshot: afterSnap.snapshot, url: afterSnap.url, title: afterSnap.title });
+      }
+    } catch { /* snapshot failed — don't break the action result */ }
   }
 
   // Strip internal fields before returning
@@ -3879,7 +4057,7 @@ function appendConsoleErrors(result, tabId) {
 // ─── MCP Server Setup ───────────────────────────────────────────────
 
 const server = new Server(
-  { name: "cdp-browser", version: "4.6.0" },
+  { name: "cdp-browser", version: "4.7.0" },
   { capabilities: { tools: {} } }
 );
 

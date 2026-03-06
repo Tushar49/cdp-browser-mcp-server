@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-4.6.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-4.7.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/tools-10-green" alt="Tools">
   <img src="https://img.shields.io/badge/sub--actions-62+-green" alt="Actions">
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen" alt="Node">
@@ -229,18 +229,20 @@ The server communicates over stdio using the MCP protocol. Any MCP-compatible cl
 
 | Action | Description | Required | Optional |
 |--------|-------------|----------|----------|
-| `click` | Click an element (auto-retry until actionable) | `tabId`, `uid` or `selector` | `button`, `clickCount`, `modifiers`, `timeout` |
-| `hover` | Hover to trigger tooltips/menus | `tabId`, `uid` or `selector` | `modifiers`, `timeout` |
-| `type` | Type text into input field | `tabId`, `text`, `uid` or `selector` | `clear`, `submit`, `delay`, `charDelay`, `wordDelay`, `timeout` |
+| `click` | Click an element (auto-retry until actionable) | `tabId`, `uid` or `selector` | `button`, `clickCount`, `modifiers`, `timeout`, `humanMode` |
+| `hover` | Hover to trigger tooltips/menus | `tabId`, `uid` or `selector` | `modifiers`, `timeout`, `humanMode` |
+| `type` | Type text into input field | `tabId`, `text`, `uid` or `selector` | `clear`, `submit`, `delay`, `charDelay`, `wordDelay`, `typoRate`, `timeout` |
 | `fill` | Fill multiple form fields at once | `tabId`, `fields[]` | `timeout` |
 | `select` | Select dropdown option | `tabId`, `value`, `uid` or `selector` | `timeout` |
 | `press` | Press keyboard key | `tabId`, `key` | `modifiers` |
-| `drag` | Drag element to target | `tabId`, source + target | `timeout` |
+| `drag` | Drag element to target | `tabId`, source + target | `timeout`, `humanMode` |
 | `scroll` | Scroll page or element | `tabId` | `direction`, `amount`, `x`, `y`, `uid`, `timeout` |
 | `upload` | Upload files to file input | `tabId`, `files[]`, `uid` or `selector` | `timeout` |
 | `focus` | Focus element + scroll into view | `tabId`, `uid` or `selector` | `timeout` |
 | `check` | Toggle checkbox | `tabId`, `checked`, `uid` or `selector` | `timeout` |
 | `tap` | Tap element using touch events | `tabId`, `uid` or `selector` | `timeout` |
+
+**Global interact flags:** `autoSnapshot` (get before/after diff), `humanMode` (bezier mouse paths), `typoRate` (typing errors)
 
 ### `execute` — JavaScript Execution
 
@@ -392,6 +394,27 @@ Multiple AI agents can share the same Chrome instance without interfering. Each 
 - Use `cleanup.session` to explicitly end a session and clean up its tabs
 
 Optionally pass a custom `sessionId` to reconnect to a specific session across restarts.
+
+### Human-Like Interaction Mode
+
+Set `humanMode: true` on any `interact` action for anti-detection mouse movement:
+- **Bezier curve paths** — mouse follows a randomized cubic bezier curve instead of teleporting to the target
+- **Overshoot + correction** — overshoots the target by 3–8px, then corrects back (natural hand movement)
+- **Variable speed** — faster in the middle, slower near the target
+- **Jitter** — slight pixel-level randomness, peaking mid-movement
+- **Position tracking** — subsequent `humanMode` calls start from the actual last position
+
+For typing, add `typoRate: 0.03` (3% chance per char) alongside `charDelay`/`wordDelay` — types adjacent QWERTY keys, pauses to "notice", then backspace-corrects.
+
+### Auto-Snapshot Diffing
+
+Set `autoSnapshot: true` on any `interact` action to automatically:
+1. Take an accessibility snapshot **before** the action
+2. Execute the action
+3. Take a snapshot **after** the action
+4. Return a **line-level diff** appended to the response
+
+If the action triggers navigation, shows the new page snapshot instead of a diff. Works independently of `humanMode`.
 
 ### Chrome Profile & Instance Management
 

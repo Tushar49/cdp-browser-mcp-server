@@ -2,6 +2,25 @@
 
 All notable changes to CDP Browser MCP Server will be documented in this file.
 
+## [4.7.0] — 2026-03-07
+
+### Added — Human-Like Interaction Consolidation
+
+Bezier curve mouse paths, typo simulation, and auto-snapshot diffing for the `interact` tool.
+
+### Added
+- **`humanMode` flag on interact tool** — enables bezier curve mouse paths with overshoot, jitter, and variable speed for `click`, `hover`, and `drag` actions. Mouse movement follows a cubic bezier with randomized control points, overshoots by 3–8px, then corrects back. Speed varies: faster in the middle, slower near the target.
+- **`generateBezierPath(from, to, steps, jitter)` helper** — produces natural-looking mouse paths. Control point spread scales with distance. Jitter peaks mid-movement, minimal at endpoints.
+- **`autoSnapshot` flag on interact tool** — takes accessibility snapshots before and after any action, computes a line-level diff, and appends it to the response. Navigation fallback: if the action triggers navigation, shows the new page snapshot instead of a diff.
+- **`typoRate` parameter for typing** — probability (0–1) of typing a wrong adjacent key then backspace-correcting. Uses QWERTY keyboard neighbor map. Requires `charDelay` or `wordDelay` to be active.
+- **`getAdjacentKey(char)` + `QWERTY_NEIGHBORS` map** — returns a random adjacent key on QWERTY layout for realistic typo simulation
+- **Mouse position tracking** — `lastMouseX`/`lastMouseY` stored on agent session so subsequent `humanMode` calls start from the actual last position instead of (0,0)
+- **Bump version to 4.7.0**
+
+### Fixed
+- **`withRetry` stale-UID fast-fail** — errors containing `ref=` + `not found` now throw immediately instead of polling for 5 seconds (refMaps is static between snapshots)
+- **DOM resolution race condition** — `resolveElementObjectId` now bundled inside `withRetry` alongside `checkActionability` in type/fill/select/check handlers to prevent crashes from mid-flight page re-renders
+
 ## [4.6.0] — 2026-03-06
 
 ### Added — Playwright Audit Priority A
