@@ -7,9 +7,9 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-4.2.0-blue" alt="Version">
-  <img src="https://img.shields.io/badge/tools-9-green" alt="Tools">
-  <img src="https://img.shields.io/badge/sub--actions-54+-green" alt="Actions">
+  <img src="https://img.shields.io/badge/version-4.6.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/tools-10-green" alt="Tools">
+  <img src="https://img.shields.io/badge/sub--actions-62+-green" alt="Actions">
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen" alt="Node">
   <img src="https://img.shields.io/badge/license-MIT-yellow" alt="License">
 </p>
@@ -38,7 +38,7 @@ CDP Browser MCP Server connects to your **already-running** browser over a WebSo
 | Browser Use needs Python + LLM key | Heavy framework, double LLM cost |
 | BrowserTools MCP is read-only | Can observe but can't automate |
 
-**This server**: connects to Chrome on `localhost:9222`, uses the real browser state, and gives you **54+ automation actions** across 9 tools — all from a single `server.js` file with 2 dependencies. Geolocation spoofing automatically grants browser permissions so permission-based sites just work.
+**This server**: connects to Chrome on `localhost:9222`, uses the real browser state, and gives you **62+ automation actions** across 10 tools — all from a single `server.js` file with 2 dependencies. Geolocation spoofing automatically grants browser permissions so permission-based sites just work.
 
 ---
 
@@ -49,7 +49,7 @@ CDP Browser MCP Server connects to your **already-running** browser over a WebSo
 | Connects to real browser | **Yes** | Via flag only | No (cloud) | No | Read-only |
 | Preserves cookies/sessions | **Yes** | No | No | No | Yes |
 | Works with extensions | **Yes** | No | No | No | Yes |
-| Tool count | **9 tools, 54+ actions** | ~30 tools | ~10 tools | 7 tools | ~13 tools |
+| Tool count | **10 tools, 62+ actions** | ~30 tools | ~10 tools | 7 tools | ~13 tools |
 | Auto-waiting after actions | **Yes** | Yes | Yes | No | N/A |
 | Network interception | **Yes** (mock/block/modify) | No | No | No | Read-only |
 | HTTP request mocking | **Yes** | No | No | No | No |
@@ -63,14 +63,16 @@ CDP Browser MCP Server connects to your **already-running** browser over a WebSo
 | Console monitoring | **Yes** (auto-appended) | Yes | Limited | Yes | Yes |
 | Download tracking | **Yes** | No | No | No | No |
 | Framework-aware inputs | **Yes** (React/Angular/MUI) | Yes | Via AI | No | No |
-| Per-agent session isolation | **Yes** | Yes | Yes | No | No |
+| Per-agent session isolation | **Yes** (exclusive tab locks) | Yes | Yes | No | No |
+| Tab ownership & locking | **Yes** (exclusive by default) | No | No | No | No |
+| Chrome profile/instance mgmt | **Yes** (detect, switch, list) | No | Cloud profiles | No | No |
 | Custom dropdown support | **Yes** (MUI/Ant/React Select) | Native | Via AI | No | No |
 | Modal/dialog guards | **Yes** | Yes | No | No | No |
 | Incremental snapshot diffs | **Yes** | Yes | No | No | No |
 | Requires paid service | **No** | No | Yes | No | No |
 | Requires LLM API key | **No** | No | Yes | No | No |
 | Dependencies | **2** (ws, MCP SDK) | Playwright + browsers | API key + subscription | Puppeteer + Chromium | 3-part install |
-| Single file server | **Yes** (~2900 lines) | Multi-file package | Multi-file package | Multi-file | Multi-file |
+| Single file server | **Yes** (~3900 lines) | Multi-file package | Multi-file package | Multi-file | Multi-file |
 | Status | **Active** | Active | Active | **Deprecated** | Active |
 | Startup speed | **Instant** (WebSocket connect) | Slow (browser launch) | Slow (cloud API) | Slow (3-5 min w/ tabs) | N/A |
 
@@ -215,27 +217,30 @@ The server communicates over stdio using the MCP protocol. Any MCP-compatible cl
 | `snapshot` | Accessibility tree with element refs | `tabId` | — |
 | `screenshot` | Capture page or element as image (fullPage scrolls SPA containers to trigger lazy loading) | `tabId` | `fullPage`, `quality`, `uid`, `type`, `path` |
 | `content` | Extract text or HTML | `tabId` | `uid`, `selector`, `format` |
+| `set_content` | Set page HTML content directly | `tabId`, `html` | — |
 | `wait` | Wait for condition or fixed delay | `tabId` | `text`, `textGone`, `selector`, `state`, `timeout`(ms) |
 | `pdf` | Export page as PDF | `tabId` | `landscape`, `scale`, `paperWidth`, `paperHeight`, `margin` |
 | `dialog` | Handle JS alert/confirm/prompt | `tabId` | `accept`, `text` |
 | `inject` | Inject script on every page load | `tabId`, `script` | — |
+| `add_style` | Inject CSS (inline or external URL) | `tabId`, `css` or `cssUrl` | `persistent` |
 | `bypass_csp` | Disable Content Security Policy | `tabId` | `enabled` |
 
 ### `interact` — Element Interaction
 
 | Action | Description | Required | Optional |
 |--------|-------------|----------|----------|
-| `click` | Click an element | `tabId`, `uid` or `selector` | `button`, `clickCount`, `modifiers` |
-| `hover` | Hover to trigger tooltips/menus | `tabId`, `uid` or `selector` | `modifiers` |
-| `type` | Type text into input field | `tabId`, `text`, `uid` or `selector` | `clear`, `submit`, `delay` |
-| `fill` | Fill multiple form fields at once | `tabId`, `fields[]` | — |
-| `select` | Select dropdown option | `tabId`, `value`, `uid` or `selector` | — |
+| `click` | Click an element (auto-retry until actionable) | `tabId`, `uid` or `selector` | `button`, `clickCount`, `modifiers`, `timeout` |
+| `hover` | Hover to trigger tooltips/menus | `tabId`, `uid` or `selector` | `modifiers`, `timeout` |
+| `type` | Type text into input field | `tabId`, `text`, `uid` or `selector` | `clear`, `submit`, `delay`, `charDelay`, `wordDelay`, `timeout` |
+| `fill` | Fill multiple form fields at once | `tabId`, `fields[]` | `timeout` |
+| `select` | Select dropdown option | `tabId`, `value`, `uid` or `selector` | `timeout` |
 | `press` | Press keyboard key | `tabId`, `key` | `modifiers` |
-| `drag` | Drag element to target | `tabId`, source + target | — |
-| `scroll` | Scroll page or element | `tabId` | `direction`, `amount`, `x`, `y`, `uid` |
-| `upload` | Upload files to file input | `tabId`, `files[]`, `uid` or `selector` | — |
-| `focus` | Focus element + scroll into view | `tabId`, `uid` or `selector` | — |
-| `check` | Toggle checkbox | `tabId`, `checked`, `uid` or `selector` | — |
+| `drag` | Drag element to target | `tabId`, source + target | `timeout` |
+| `scroll` | Scroll page or element | `tabId` | `direction`, `amount`, `x`, `y`, `uid`, `timeout` |
+| `upload` | Upload files to file input | `tabId`, `files[]`, `uid` or `selector` | `timeout` |
+| `focus` | Focus element + scroll into view | `tabId`, `uid` or `selector` | `timeout` |
+| `check` | Toggle checkbox | `tabId`, `checked`, `uid` or `selector` | `timeout` |
+| `tap` | Tap element using touch events | `tabId`, `uid` or `selector` | `timeout` |
 
 ### `execute` — JavaScript Execution
 
@@ -305,7 +310,16 @@ Set any combination of properties in a single call:
 | `disconnect_all` | Disconnect all sessions | — | — |
 | `clean_temp` | Delete temp files | — | — |
 | `status` | Server status | — | — |
-| `list_sessions` | List agent sessions | — | — |
+| `list_sessions` | List agent sessions with details | — | — |
+| `session` | End a session, cleanup owned tabs | — | `targetSessionId`, `cleanupStrategy` |
+
+### `browser` — Chrome Instance & Profile Management
+
+| Action | Description | Required | Optional |
+|--------|-------------|----------|---------|
+| `profiles` | List all Chrome instances with profiles | — | — |
+| `connect` | Switch to a different Chrome instance | `instance` | — |
+| `active` | Show current connection info | — | — |
 
 ---
 
@@ -335,7 +349,7 @@ Every click, type, fill, select, and press action is wrapped in `waitForCompleti
 
 No more "click then pray" — the server knows when the action's side effects are done.
 
-### Actionability Checks
+### Actionability Checks + Auto-Retry
 
 Before interacting with any element, the server verifies:
 - Element has non-zero dimensions
@@ -343,7 +357,9 @@ Before interacting with any element, the server verifies:
 - Element is visible (`display`, `visibility`, `opacity`)
 - Element has `pointer-events` enabled
 
-If checks fail, you get a descriptive error with recovery hints instead of a silent failure.
+All interaction actions automatically **retry** element resolution and actionability checks until the element is found and actionable, or the timeout expires (default: 5000ms, configurable via `timeout` parameter). This matches Playwright's auto-waiting behavior — no manual polling needed.
+
+If checks fail after retries, you get a descriptive error with recovery hints instead of a silent failure.
 
 ### Framework-Aware Form Filling
 
@@ -364,15 +380,28 @@ After the first snapshot, subsequent calls return a line-level diff showing only
 + - button "Submit" [disabled] [ref=15]
 ```
 
-### Per-Agent Session Isolation
+### Per-Agent Session Isolation with Exclusive Tab Locks
 
 Multiple AI agents can share the same Chrome instance without interfering. Each server process is **automatically assigned a session** via `crypto.randomUUID()` — no opt-in needed. Each agent gets:
-- Scoped tab visibility (agent A can't see agent B's tabs via `tabs.list`)
+- **Exclusive tab ownership** — tabs are locked to the session that created/claimed them. Other agents are blocked by default (`exclusive: false` to override)
+- Scoped tab visibility (agent A can’t see agent B’s tabs via `tabs.list`)
 - Independent console/network logs
+- **Configurable cleanup strategy** — `close` (default: removes tabs on expiry), `detach` (keeps tabs open), or `none` (persist indefinitely)
 - TTL-based expiry with full CDP cleanup (default: 5 minutes, configurable via `CDP_SESSION_TTL`)
 - Use `showAll: true` on `tabs.list` to bypass filtering and see all tabs
+- Use `cleanup.session` to explicitly end a session and clean up its tabs
 
 Optionally pass a custom `sessionId` to reconnect to a specific session across restarts.
+
+### Chrome Profile & Instance Management
+
+The `browser` tool detects all running Chrome instances (Chrome, Beta, Canary, Chromium) by scanning for `DevToolsActivePort` files. It reads `Local State` for profile names and emails.
+
+- **`browser.profiles`** — list all instances with ports, profiles, and connection status
+- **`browser.connect`** — switch to a different Chrome instance by name, port, or path
+- **`browser.active`** — show current instance info, profiles, health, tabs per profile context
+- **`tabs.info`** shows `browserContextId` for profile identification
+- Set `CDP_PROFILE` env var to auto-connect at startup
 
 ### Modal/Dialog Guards
 
@@ -403,6 +432,9 @@ WebSocket ping/pong every 30 seconds. If 2 consecutive pings fail, the connectio
 | `CDP_PORT` | `9222` | Chrome DevTools Protocol port |
 | `CDP_TIMEOUT` | `30000` | Command timeout in milliseconds |
 | `CDP_SESSION_TTL` | `300000` | Agent session TTL in milliseconds (5 min) |
+| `CDP_PROFILE` | — | Auto-connect to Chrome instance by name or User Data path |
+| `CDP_USER_DATA` | — | Custom Chrome User Data directory path |
+| `CDP_TEMP_DIR` | `.temp` | Directory for temp files (screenshots, PDFs) |
 
 ---
 
@@ -529,10 +561,13 @@ A: No. It connects directly to Chrome via CDP WebSocket. Only dependencies are `
 A: Yes. Each agent process is automatically assigned an isolated session — no configuration needed. Sessions auto-expire after 5 minutes. Pass a custom `sessionId` to reconnect to a previous session.
 
 **Q: Does it work with Chrome profiles / corporate Chrome?**  
-A: Yes. It connects to whatever Chrome instance is running on the configured port, including managed/enterprise Chrome with all its policies, certificates, and proxy settings.
+A: Yes. The `browser` tool detects all running Chrome instances and their profiles. Use `browser.profiles` to see available instances and `browser.connect` to switch between them. All Chrome profiles within one instance share a single debug port — each profile's tabs are distinguishable via `browserContextId` in `tabs.info`.
 
 **Q: What about iframes and Shadow DOM?**  
-A: The snapshot uses `Accessibility.getFullAXTree()` which captures the full accessibility tree including shadow DOM and iframes. Element refs work across frames.
+A: The snapshot uses `Accessibility.getFullAXTree()` which captures the full accessibility tree including shadow DOM and iframes. Element refs (uid) work across frames — use `uid` from snapshots to interact with iframe elements. CSS selectors only find top-level elements.
+
+**Q: Does it support touch events?**  
+A: Yes. Use `interact.tap` to dispatch touch events (`touchStart` + `touchEnd`) on elements, with full actionability checks and auto-retry. Use `emulate` with `viewport: { touch: true }` to enable touch emulation.
 
 **Q: Can I use it with Edge?**  
 A: Edge (Chromium-based) works out of the box — same CDP protocol. Enable remote debugging the same way.
