@@ -2,6 +2,30 @@
 
 All notable changes to CDP Browser MCP Server will be documented in this file.
 
+## [4.4.0] — 2026-03-06
+
+### Added — Session Exclusivity & Configurable Auto-Cleanup
+
+Agent sessions now own tabs exclusively with automatic cleanup when sessions expire.
+
+### Added
+- **Exclusive tab locking** — tabs are locked to the first agent session that references them. Other sessions are rejected with a clear error unless `exclusive: false` is passed to share access
+- **Tab ownership at creation** — `tabs.new` immediately registers the new tab in the session's ownership and locks it, eliminating the unowned-tab gap
+- **`cleanupStrategy` parameter** — controls what happens when a session expires: `"close"` (default) removes tabs from the browser, `"detach"` drops the CDP session but keeps tabs open, `"none"` skips cleanup entirely
+- **`cleanup.session` action** — explicitly end a session and run its cleanup strategy on demand, with `targetSessionId` to end a specific session
+- **`sweepStaleSessions()` shared function** — replaced two duplicated TTL sweep blocks with a single function, fixing `handleCleanupListSessions` which previously deleted stale entries without detaching their tabs
+- **`cleanupTab()` helper** — wraps `detachTab()` + optional `Target.closeTarget` based on cleanup strategy
+- **Locked-tab annotations** — `tabs.list` (with `showAll: true`) and `tabs.find` now annotate tabs owned by other sessions with `[locked by: ...]`
+- **`sessionId`, `cleanupStrategy`, `exclusive` parameters** — declared in all 9 tool schemas so agents discover them. `cleanupStrategy` is sticky per session
+- **Enhanced `list_sessions` output** — shows cleanup strategy, owned vs. borrowed tabs, per-session TTL remaining
+
+### Changed
+- **`detachTab()` restructured** — lock cleanup (`tabLocks.delete`) and session reference removal now run **before** the `!sid` early-return guard, ensuring locks are always released even for tabs that were never interacted with
+- **`disconnect_tab` / `disconnect_all` lock guards** — these handlers now check tab lock ownership before detaching, preventing agents from detaching tabs owned by other sessions
+- **Borrowed-tab safety** — the TTL sweep and `cleanup.session` only clean up tabs the session actually owns (checks `tabLocks.get(tid) === sessionId`), never closing/detaching borrowed tabs
+
+---
+
 ## [4.3.0] — 2026-02-20
 
 ### Added — Human-Like Typing with Word-Aware Delays

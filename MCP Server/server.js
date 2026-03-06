@@ -117,7 +117,8 @@ const fetchRules = new Map();           // sessionId → [ { pattern, action, re
 const injectedScripts = new Map();      // sessionId → [ { identifier, description } ]
 const refMaps = new Map();              // sessionId → Map<uid, backendNodeId>
 const lastSnapshots = new Map();        // sessionId → { snapshot, url, title }
-const agentSessions = new Map();        // agentSessionId → { lastActivity, tabIds: Set<tabId> }
+const agentSessions = new Map();        // agentSessionId → { lastActivity, tabIds: Set<tabId>, cleanupStrategy: string }
+const tabLocks = new Map();             // tabId → agentSessionId (exclusive ownership)
 const processSessionId = randomUUID();  // auto-assigned per-process session ID
 
 const downloads = new Map();              // sessionId → [{guid, url, suggestedFilename, state, receivedBytes, totalBytes}]
@@ -496,6 +497,12 @@ async function enableMonitoring(sessionId, what) {
 }
 
 async function detachTab(tabId) {
+  // Always clean lock and session refs first — even if no CDP session exists
+  // (a tab created via tabs.new gets locked immediately but may never be interacted with)
+  tabLocks.delete(tabId);
+  for (const [, agentSession] of agentSessions) {
+    agentSession.tabIds.delete(tabId);
+  }
   const sid = activeSessions.get(tabId);
   if (!sid) return;
   try { await cdp("Target.detachFromTarget", { sessionId: sid }); } catch { /* ok */ }
@@ -511,13 +518,45 @@ async function detachTab(tabId) {
   refMaps.delete(sid);
   lastSnapshots.delete(sid);
   downloads.delete(sid);
-  // Remove tabId from all agent sessions to prevent stale references
-  for (const [, agentSession] of agentSessions) {
-    agentSession.tabIds.delete(tabId);
-  }
 }
 
 // ─── Tab Listing ────────────────────────────────────────────────────
+
+/**
+ * Clean up a tab with the given strategy.
+ * @param {string} tabId
+ * @param {"close"|"detach"|"none"} strategy
+ */
+async function cleanupTab(tabId, strategy = "close") {
+  await detachTab(tabId); // also calls tabLocks.delete(tabId) internally
+  if (strategy === "close") {
+    try { await cdp("Target.closeTarget", { targetId: tabId }); } catch { /* ok */ }
+  }
+}
+
+/**
+ * Sweep stale agent sessions and clean up their owned tabs.
+ * Shared function called from handleTool and periodic setInterval.
+ */
+async function sweepStaleSessions() {
+  const now = Date.now();
+  for (const [id, s] of agentSessions) {
+    if (now - s.lastActivity > SESSION_TTL) {
+      if (s.cleanupStrategy !== "none") {
+        for (const tid of s.tabIds) {
+          // Only cleanup tabs this session actually owns (locked to it)
+          // Borrowed tabs (exclusive:false) should just be removed from tabIds, not closed/detached
+          if (tabLocks.get(tid) === id) {
+            try { await cleanupTab(tid, s.cleanupStrategy); } catch { /* ok */ }
+          }
+        }
+      }
+      // Always clear the session's tabIds (including borrowed refs)
+      s.tabIds.clear();
+      agentSessions.delete(id);
+    }
+  }
+}
 
 async function getTabs() {
   await connectBrowser();
@@ -1088,7 +1127,9 @@ const TOOLS = [
         tabId: { type: "string", description: "Tab ID for close/activate/info." },
         url: { type: "string", description: "URL for 'new' action." },
         showAll: { type: "boolean", description: "Show all browser tabs, not just session-owned ones (for list action)." },
-        sessionId: { type: "string", description: "Optional session ID to connect to a specific session. Auto-assigned if omitted." },
+        sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
+        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs, 'detach' keeps them, 'none' skips cleanup. Sticky per session." },
+        exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
       },
       required: ["action"],
     },
@@ -1154,7 +1195,9 @@ const TOOLS = [
         margin: { type: "object", description: "PDF margins {top, bottom, left, right} in inches.", properties: { top: { type: "number" }, bottom: { type: "number" }, left: { type: "number" }, right: { type: "number" } } },
         script: { type: "string", description: "Script for inject action." },
         enabled: { type: "boolean", description: "Enable/disable for bypass_csp." },
-        sessionId: { type: "string", description: "Optional session ID to connect to a specific session. Auto-assigned if omitted." },
+        sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
+        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs, 'detach' keeps them, 'none' skips cleanup. Sticky per session." },
+        exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
       },
       required: ["action", "tabId"],
     },
@@ -1218,7 +1261,9 @@ const TOOLS = [
         y: { type: "number", description: "Scroll-to Y position." },
         files: { type: "array", items: { type: "string" }, description: "File paths for upload." },
         checked: { type: "boolean", description: "Desired checked state for check action." },
-        sessionId: { type: "string", description: "Optional session ID to connect to a specific session. Auto-assigned if omitted." },
+        sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
+        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs, 'detach' keeps them, 'none' skips cleanup. Sticky per session." },
+        exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
       },
       required: ["action", "tabId"],
     },
@@ -1256,7 +1301,9 @@ const TOOLS = [
         function: { type: "string", description: "JS function for call, receives element as arg. E.g. '(el) => el.textContent'" },
         uid: { type: "number", description: "Element uid for call." },
         selector: { type: "string", description: "CSS selector for call." },
-        sessionId: { type: "string", description: "Optional session ID to connect to a specific session. Auto-assigned if omitted." },
+        sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
+        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs, 'detach' keeps them, 'none' skips cleanup. Sticky per session." },
+        exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
       },
       required: ["action", "tabId"],
     },
@@ -1298,7 +1345,9 @@ const TOOLS = [
         clear: { type: "boolean", description: "Clear captured data after returning." },
         last: { type: "number", description: "Return only last N items." },
         requestId: { type: "string", description: "Request ID for full body retrieval." },
-        sessionId: { type: "string", description: "Optional session ID to connect to a specific session. Auto-assigned if omitted." },
+        sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
+        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs, 'detach' keeps them, 'none' skips cleanup. Sticky per session." },
+        exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
       },
       required: ["action", "tabId"],
     },
@@ -1354,7 +1403,9 @@ const TOOLS = [
         blockUrls: { type: "array", items: { type: "string" }, description: "URLs to block." },
         extraHeaders: { type: "object", description: "Extra HTTP headers." },
         reset: { type: "boolean", description: "Reset all emulation overrides." },
-        sessionId: { type: "string", description: "Optional session ID to connect to a specific session. Auto-assigned if omitted." },
+        sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
+        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs, 'detach' keeps them, 'none' skips cleanup. Sticky per session." },
+        exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
       },
       required: ["tabId"],
     },
@@ -1397,7 +1448,9 @@ const TOOLS = [
         url: { type: "string", description: "URL for delete_cookies." },
         origin: { type: "string", description: "Origin for clear_data." },
         types: { type: "string", description: "Storage types: 'cookies,local_storage,indexeddb,cache_storage' or 'all'." },
-        sessionId: { type: "string", description: "Optional session ID to connect to a specific session. Auto-assigned if omitted." },
+        sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
+        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs, 'detach' keeps them, 'none' skips cleanup. Sticky per session." },
+        exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
       },
       required: ["action", "tabId"],
     },
@@ -1444,7 +1497,9 @@ const TOOLS = [
         status: { type: "number", description: "Response status for fulfill." },
         body: { type: "string", description: "Response body for fulfill." },
         reason: { type: "string", enum: ["Failed", "Aborted", "TimedOut", "AccessDenied", "ConnectionClosed", "ConnectionReset", "ConnectionRefused", "ConnectionAborted", "ConnectionFailed", "NameNotResolved", "InternetDisconnected", "AddressUnreachable", "BlockedByClient", "BlockedByResponse"], description: "Failure reason." },
-        sessionId: { type: "string", description: "Optional session ID to connect to a specific session. Auto-assigned if omitted." },
+        sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
+        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs, 'detach' keeps them, 'none' skips cleanup. Sticky per session." },
+        exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
       },
       required: ["action", "tabId"],
     },
@@ -1454,14 +1509,17 @@ const TOOLS = [
   {
     name: "cleanup",
     description: [
-      "Disconnect browser sessions and clean up temporary files created by the server.",
+      "Disconnect browser sessions, clean up temporary files, and manage agent sessions.",
       "",
       "Operations:",
       "- disconnect_tab: Disconnect from a specific tab session without closing the tab (requires: tabId)",
-      "- disconnect_all: Disconnect all active tab sessions (no parameters)",
+      "- disconnect_all: Disconnect all active tab sessions owned by this session (no parameters)",
       "- clean_temp: Delete all temporary files (screenshots, PDFs) created by the server (no parameters)",
       "- status: Show current server status — active sessions, temp file count, connection state (no parameters)",
-      "- list_sessions: List all active agent sessions with their TTL, idle time, and associated tabs (no parameters)",
+      "- list_sessions: List all active agent sessions with their TTL, idle time, cleanup strategy, and associated tabs (no parameters)",
+      "- session: Explicitly end an agent session and clean up its owned tabs (optional: targetSessionId, cleanupStrategy)",
+      "",
+      "Session params (all tools): sessionId — agent session ID for tab ownership/isolation; cleanupStrategy — close|detach|none for tab cleanup on expiry (default: close); exclusive — lock tabs to session (default: true)",
     ].join("\n"),
     annotations: {
       title: "Session Cleanup",
@@ -1472,9 +1530,12 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["disconnect_tab", "disconnect_all", "clean_temp", "status", "list_sessions"], description: "Cleanup action." },
+        action: { type: "string", enum: ["disconnect_tab", "disconnect_all", "clean_temp", "status", "list_sessions", "session"], description: "Cleanup action." },
         tabId: { type: "string", description: "Tab ID for disconnect_tab." },
-        sessionId: { type: "string", description: "Optional session ID to connect to a specific session. Auto-assigned if omitted." },
+        targetSessionId: { type: "string", description: "End a specific session by ID (for 'session' action). Default: caller's own session." },
+        sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
+        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs from browser, 'detach' keeps them open, 'none' skips cleanup. Sticky per session." },
+        exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
       },
       required: ["action"],
     },
@@ -1487,12 +1548,14 @@ const TOOLS = [
 
 // ─── Tabs Handlers ──────────────────────────────────────────────────
 
-async function handleTabsList() {
+async function handleTabsList(args) {
   const tabs = await getTabs();
   if (!tabs.length) return ok("No open tabs found.");
   const lines = tabs.map((t, i) => {
     const c = activeSessions.has(t.targetId) ? " [connected]" : "";
-    return `${i + 1}. [${t.targetId}]${c}\n   ${t.title}\n   ${t.url}`;
+    const lockOwner = tabLocks.get(t.targetId);
+    const lockTag = lockOwner && lockOwner !== args._agentSessionId ? ` [locked by: ${lockOwner.substring(0, 8)}…]` : "";
+    return `${i + 1}. [${t.targetId}]${c}${lockTag}\n   ${t.title}\n   ${t.url}`;
   });
   return ok(`${tabs.length} tab(s):\n\n${lines.join("\n\n")}`);
 }
@@ -1505,7 +1568,9 @@ async function handleTabsFind(args) {
   if (!hits.length) return ok(`No tabs matching "${args.query}".`);
   const lines = hits.map(t => {
     const c = activeSessions.has(t.targetId) ? " [connected]" : "";
-    return `[${t.targetId}]${c} ${t.title}\n   ${t.url}`;
+    const lockOwner = tabLocks.get(t.targetId);
+    const lockTag = lockOwner && lockOwner !== args._agentSessionId ? ` [locked by: ${lockOwner.substring(0, 8)}…]` : "";
+    return `[${t.targetId}]${c}${lockTag} ${t.title}\n   ${t.url}`;
   });
   return ok(`${hits.length} match(es):\n\n${lines.join("\n\n")}`);
 }
@@ -1513,6 +1578,11 @@ async function handleTabsFind(args) {
 async function handleTabsNew(args) {
   const url = args.url || "about:blank";
   const { targetId } = await cdp("Target.createTarget", { url });
+  // Register ownership immediately so tabs.list shows it right away
+  if (args._agentSession) {
+    args._agentSession.tabIds.add(targetId);
+    tabLocks.set(targetId, args._agentSessionId);
+  }
   return ok(`New tab: [${targetId}]\nURL: ${url}`);
 }
 
@@ -3121,14 +3191,30 @@ async function handleInterceptList(args) {
 
 async function handleCleanupDisconnectTab(args) {
   if (!args.tabId) return fail("Provide 'tabId'.");
+  // Only allow disconnecting tabs this session owns or unowned tabs
+  const lockOwner = tabLocks.get(args.tabId);
+  if (lockOwner && lockOwner !== args._agentSessionId) {
+    return fail(`Tab [${args.tabId}] is locked by another session. Cannot disconnect.`);
+  }
   await detachTab(args.tabId);
   return ok("Detached from tab.");
 }
 
-async function handleCleanupDisconnectAll() {
+async function handleCleanupDisconnectAll(args) {
   const ids = [...activeSessions.keys()];
-  for (const id of ids) await detachTab(id);
-  return ok(`Disconnected from ${ids.length} tab(s).`);
+  let count = 0;
+  let skipped = 0;
+  for (const id of ids) {
+    // Only disconnect tabs caller owns or unowned tabs
+    const lockOwner = tabLocks.get(id);
+    if (!lockOwner || lockOwner === args._agentSessionId) {
+      await detachTab(id);
+      count++;
+    } else {
+      skipped++;
+    }
+  }
+  return ok(`Disconnected from ${count} tab(s).${skipped ? ` ${skipped} locked tab(s) skipped.` : ""}`);
 }
 
 async function handleCleanupCleanTemp() {
@@ -3137,23 +3223,49 @@ async function handleCleanupCleanTemp() {
 }
 
 async function handleCleanupListSessions() {
-  // Expire stale sessions first
-  const now = Date.now();
-  for (const [id, s] of agentSessions) {
-    if (now - s.lastActivity > SESSION_TTL) agentSessions.delete(id);
-  }
+  // Expire stale sessions first (with proper cleanup)
+  await sweepStaleSessions();
   if (agentSessions.size === 0) return ok("No active agent sessions.");
-  const lines = [];
+  const now = Date.now();
+  const sections = [];
   for (const [id, s] of agentSessions) {
     const age = ((now - s.lastActivity) / 1000).toFixed(0);
     const ttl = Math.max(0, ((SESSION_TTL - (now - s.lastActivity)) / 1000)).toFixed(0);
-    lines.push(`  ${id} — ${s.tabIds.size} tab(s), idle ${age}s, expires in ${ttl}s`);
+    const ownedTabs = [...s.tabIds].filter(tid => tabLocks.get(tid) === id);
+    const borrowedTabs = [...s.tabIds].filter(tid => tabLocks.get(tid) !== id);
+    let section = `Session: ${id}\n  Last activity: ${age}s ago | TTL remaining: ${ttl}s\n  Cleanup strategy: ${s.cleanupStrategy || "close"}\n  Owned tabs: ${ownedTabs.length}`;
+    if (ownedTabs.length) section += "\n    " + ownedTabs.join("\n    ");
+    if (borrowedTabs.length) section += `\n  Borrowed tabs: ${borrowedTabs.length}\n    ` + borrowedTabs.join("\n    ");
+    sections.push(section);
   }
   return ok(
     `Agent sessions: ${agentSessions.size}\n` +
     `Session TTL: ${SESSION_TTL / 1000}s\n\n` +
-    lines.join("\n")
+    sections.join("\n\n")
   );
+}
+
+/**
+ * Explicitly end an agent session and clean up its owned tabs.
+ * Borrowed tabs are released without being closed/detached.
+ */
+async function handleCleanupSession(args) {
+  const sid = args.targetSessionId || args._agentSessionId;
+  const session = agentSessions.get(sid);
+  if (!session) return fail(`No session found: ${sid}`);
+
+  const strategy = args.cleanupStrategy || session.cleanupStrategy || "close";
+  let cleaned = 0;
+  for (const tid of session.tabIds) {
+    // Only cleanup tabs this session owns — don't touch borrowed tabs
+    if (tabLocks.get(tid) === sid) {
+      try { await cleanupTab(tid, strategy); cleaned++; } catch { /* ok */ }
+    }
+  }
+  // Clear all tab references (including borrowed) and delete session
+  session.tabIds.clear();
+  agentSessions.delete(sid);
+  return ok(`Session ${sid} ended. ${cleaned} owned tab(s) ${strategy === "close" ? "closed" : "detached"}.`);
 }
 
 async function handleCleanupStatus() {
@@ -3251,6 +3363,7 @@ const HANDLERS = {
     clean_temp: handleCleanupCleanTemp,
     status: handleCleanupStatus,
     list_sessions: handleCleanupListSessions,
+    session: handleCleanupSession,
   },
 };
 
@@ -3261,40 +3374,59 @@ async function handleTool(name, args) {
   // ── Per-agent session routing (auto-assigned per process, or explicit) ──
   const sessionId = args.sessionId || processSessionId;
   delete args.sessionId; // don't pass down to handlers
+  const cleanupStrategy = args.cleanupStrategy;
+  delete args.cleanupStrategy;
+  const exclusive = args.exclusive;
+  delete args.exclusive;
   const now = Date.now();
 
-  // Expire stale sessions and clean up their CDP state
-  for (const [id, s] of agentSessions) {
-    if (now - s.lastActivity > SESSION_TTL) {
-      for (const tid of s.tabIds) {
-        try { await detachTab(tid); } catch { /* ok */ }
-      }
-      agentSessions.delete(id);
-    }
-  }
+  // Expire stale sessions and clean up their owned tabs
+  await sweepStaleSessions();
 
   // Get or create session
   let session = agentSessions.get(sessionId);
   if (!session) {
-    session = { lastActivity: now, tabIds: new Set() };
+    session = { lastActivity: now, tabIds: new Set(), cleanupStrategy: cleanupStrategy || "close" };
     agentSessions.set(sessionId, session);
   }
   session.lastActivity = now;
+  // Update cleanup strategy if provided (sticky — persists for session lifetime)
+  if (cleanupStrategy) session.cleanupStrategy = cleanupStrategy;
 
-  // Track tab association
+  // Inject session context into args for handlers that need it (e.g. handleTabsNew, handleCleanupSession)
+  args._agentSession = session;
+  args._agentSessionId = sessionId;
+
+  // Track tab association with exclusive lock check
   if (args.tabId) {
+    const lockOwner = tabLocks.get(args.tabId);
+    if (lockOwner && lockOwner !== sessionId && exclusive !== false) {
+      delete args._agentSession;
+      delete args._agentSessionId;
+      return fail(`Tab [${args.tabId}] is locked by another agent session. Use exclusive:false to override.`);
+    }
     session.tabIds.add(args.tabId);
+    // Only set lock if tab is unowned — never overwrite another session's lock
+    if (!lockOwner) {
+      tabLocks.set(args.tabId, sessionId);
+    }
   }
 
   // For tab listing, enforce session ownership (filter to session tabs unless showAll)
   if (name === "tabs" && args.action === "list" && session.tabIds.size > 0 && !args.showAll) {
     const allTabs = await getTabs();
     const ownedTabs = allTabs.filter(t => session.tabIds.has(t.targetId));
-    if (!ownedTabs.length) return ok("No session-owned tabs. Use showAll: true to see all browser tabs.");
+    if (!ownedTabs.length) {
+      delete args._agentSession;
+      delete args._agentSessionId;
+      return ok("No session-owned tabs. Use showAll: true to see all browser tabs.");
+    }
     const lines = ownedTabs.map((t, i) => {
       const c = activeSessions.has(t.targetId) ? " [connected]" : "";
       return `${i + 1}. [${t.targetId}]${c}\n   ${t.title}\n   ${t.url}`;
     });
+    delete args._agentSession;
+    delete args._agentSessionId;
     return ok(`[session: ${sessionId}] ${ownedTabs.length} tab(s):\n\n${lines.join("\n\n")}`);
   }
 
@@ -3306,6 +3438,8 @@ async function handleTool(name, args) {
       const dialogs = pendingDialogs.get(sid) || [];
       if (dialogs.length > 0 && !(name === "page" && args.action === "dialog")) {
         const d = dialogs[0];
+        delete args._agentSession;
+        delete args._agentSessionId;
         return fail(
           `A JavaScript dialog is blocking the page. Handle it first.\n` +
           `Dialog: ${d.type} "${d.message.substring(0, 100)}"\n` +
@@ -3315,18 +3449,31 @@ async function handleTool(name, args) {
     }
   }
 
+  let result;
   // Single-function handler (emulate)
   if (typeof handler === "function") {
-    const result = await handler(args);
-    return appendConsoleErrors(result, args.tabId);
+    result = await handler(args);
+  } else {
+    // Action-based dispatch
+    const action = args.action;
+    if (!action) {
+      delete args._agentSession;
+      delete args._agentSessionId;
+      return fail(`Missing 'action' parameter for tool '${name}'.`);
+    }
+    const fn = handler[action];
+    if (!fn) {
+      delete args._agentSession;
+      delete args._agentSessionId;
+      return fail(`Unknown action '${action}' for tool '${name}'. Available: ${Object.keys(handler).join(", ")}`);
+    }
+    result = await fn(args);
   }
 
-  // Action-based dispatch
-  const action = args.action;
-  if (!action) return fail(`Missing 'action' parameter for tool '${name}'.`);
-  const fn = handler[action];
-  if (!fn) return fail(`Unknown action '${action}' for tool '${name}'. Available: ${Object.keys(handler).join(", ")}`);
-  const result = await fn(args);
+  // Strip internal fields before returning
+  delete args._agentSession;
+  delete args._agentSessionId;
+
   return appendConsoleErrors(result, args.tabId);
 }
 
@@ -3354,7 +3501,7 @@ function appendConsoleErrors(result, tabId) {
 // ─── MCP Server Setup ───────────────────────────────────────────────
 
 const server = new Server(
-  { name: "cdp-browser", version: "4.2.2" },
+  { name: "cdp-browser", version: "4.4.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -3371,16 +3518,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 // ─── Periodic Session Cleanup ────────────────────────────────────────
 
 setInterval(async () => {
-  const now = Date.now();
-  for (const [id, s] of agentSessions) {
-    if (now - s.lastActivity > SESSION_TTL) {
-      // Clean up CDP sessions for expired agent sessions
-      for (const tid of s.tabIds) {
-        try { await detachTab(tid); } catch { /* ok */ }
-      }
-      agentSessions.delete(id);
-    }
-  }
+  try { await sweepStaleSessions(); } catch { /* ok */ }
 }, 60_000); // sweep every 60s
 
 const transport = new StdioServerTransport();
