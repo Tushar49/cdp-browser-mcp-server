@@ -542,16 +542,17 @@ async function sweepStaleSessions() {
   const now = Date.now();
   for (const [id, s] of agentSessions) {
     if (now - s.lastActivity > SESSION_TTL) {
-      if (s.cleanupStrategy !== "none") {
-        for (const tid of s.tabIds) {
-          // Only cleanup tabs this session actually owns (locked to it)
-          // Borrowed tabs (exclusive:false) should just be removed from tabIds, not closed/detached
-          if (tabLocks.get(tid) === id) {
-            try { await cleanupTab(tid, s.cleanupStrategy); } catch { /* ok */ }
-          }
+      // "none" strategy = persist indefinitely — skip the entire sweep for this session
+      if (s.cleanupStrategy === "none") continue;
+
+      for (const tid of s.tabIds) {
+        // Only cleanup tabs this session actually owns (locked to it)
+        // Borrowed tabs (exclusive:false) should just be removed from tabIds, not closed/detached
+        if (tabLocks.get(tid) === id) {
+          try { await cleanupTab(tid, s.cleanupStrategy); } catch { /* ok */ }
         }
       }
-      // Always clear the session's tabIds (including borrowed refs)
+      // Clear the session's tabIds (including borrowed refs) and delete session
       s.tabIds.clear();
       agentSessions.delete(id);
     }
