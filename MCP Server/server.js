@@ -604,6 +604,7 @@ async function detachTab(tabId) {
  * @param {"close"|"detach"|"none"} strategy
  */
 async function cleanupTab(tabId, strategy = "close") {
+  if (strategy === "none") return; // "none" = no cleanup at all
   await detachTab(tabId); // also calls tabLocks.delete(tabId) internally
   if (strategy === "close") {
     try { await cdp("Target.closeTarget", { targetId: tabId }); } catch { /* ok */ }
@@ -3701,8 +3702,8 @@ async function handleCleanupDisconnectTab(args) {
   if (!args.tabId) return fail("Provide 'tabId'.");
   // Only allow disconnecting tabs this session owns or unowned tabs
   const lockOwner = tabLocks.get(args.tabId);
-  if (lockOwner && lockOwner !== args._agentSessionId) {
-    return fail(`Tab [${args.tabId}] is locked by another session. Cannot disconnect.`);
+  if (lockOwner && lockOwner !== args._agentSessionId && args.exclusive !== false) {
+    return fail(`Tab [${args.tabId}] is locked by another session. Use exclusive:false to override.`);
   }
   await detachTab(args.tabId);
   return ok("Detached from tab.");
@@ -3734,6 +3735,13 @@ async function handleCleanupListSessions() {
   // Expire stale sessions first (with proper cleanup)
   await sweepStaleSessions();
   if (agentSessions.size === 0) return ok("No active agent sessions.");
+
+  // Fetch all tabs once for URL lookup
+  let allTabs = [];
+  try { allTabs = await getTabs(); } catch { /* ok */ }
+  const tabMap = new Map();
+  for (const t of allTabs) tabMap.set(t.targetId, t);
+
   const now = Date.now();
   const sections = [];
   for (const [id, s] of agentSessions) {
@@ -3742,8 +3750,19 @@ async function handleCleanupListSessions() {
     const ownedTabs = [...s.tabIds].filter(tid => tabLocks.get(tid) === id);
     const borrowedTabs = [...s.tabIds].filter(tid => tabLocks.get(tid) !== id);
     let section = `Session: ${id}\n  Last activity: ${age}s ago | TTL remaining: ${ttl}s\n  Cleanup strategy: ${s.cleanupStrategy || "close"}\n  Owned tabs: ${ownedTabs.length}`;
-    if (ownedTabs.length) section += "\n    " + ownedTabs.join("\n    ");
-    if (borrowedTabs.length) section += `\n  Borrowed tabs: ${borrowedTabs.length}\n    ` + borrowedTabs.join("\n    ");
+    if (ownedTabs.length) {
+      for (const tid of ownedTabs) {
+        const tab = tabMap.get(tid);
+        section += `\n    [${tid}] ${tab ? tab.url : "(unknown)"}`;
+      }
+    }
+    if (borrowedTabs.length) {
+      section += `\n  Borrowed tabs: ${borrowedTabs.length}`;
+      for (const tid of borrowedTabs) {
+        const tab = tabMap.get(tid);
+        section += `\n    [${tid}] ${tab ? tab.url : "(unknown)"}`;
+      }
+    }
     sections.push(section);
   }
   return ok(
@@ -3943,7 +3962,9 @@ async function handleTool(name, args) {
     }
     const lines = ownedTabs.map((t, i) => {
       const c = activeSessions.has(t.targetId) ? " [connected]" : "";
-      return `${i + 1}. [${t.targetId}]${c}\n   ${t.title}\n   ${t.url}`;
+      const lockOwner = tabLocks.get(t.targetId);
+      const lockTag = lockOwner && lockOwner !== sessionId ? ` [locked by: ${lockOwner.substring(0, 8)}…]` : "";
+      return `${i + 1}. [${t.targetId}]${c}${lockTag}\n   ${t.title}\n   ${t.url}`;
     });
     delete args._agentSession;
     delete args._agentSessionId;
