@@ -2,6 +2,29 @@
 
 All notable changes to CDP Browser MCP Server will be documented in this file.
 
+## [4.5.0] — 2026-03-06
+
+### Added — Chrome Profile & Instance Selection
+
+New `browser` tool (#10) for Chrome instance discovery, profile visibility, and connection switching.
+
+### Added
+- **`browser.profiles` action** — scans known User Data directories (Chrome, Beta, Canary, Chromium) for `DevToolsActivePort` files, reads `Local State` for profile names/emails, shows connection status
+- **`browser.connect` action** — switch the server's WebSocket to a different Chrome instance by name, port, or path. Guards against active sessions, waits for clean close event (no race condition), uses `overrideUserDataDir` so Chrome GUID regeneration on restart doesn't break reconnection
+- **`browser.active` action** — shows connected instance name, port, User Data dir, health, profiles from Local State, and tab count per `browserContextId` (profile grouping)
+- **`discoverChromeInstances()` helper** — scans Chrome/Beta/Canary/Chromium User Data dirs, reads `DevToolsActivePort` + `Local State` profile metadata
+- **`CDP_PROFILE` env var** — auto-connect to a specific Chrome instance at startup by name or path
+- **`overrideUserDataDir` + `lastResolvedUserDataDir`** — `getWsUrl()` refactored with override support and User Data dir tracking
+- **`activeConnectionInfo`** — server state tracking current Chrome instance, auto-detected on first connection, always refreshes `wsUrl` on reconnect
+- **`tabs.info` shows `browserContextId`** — lets agents see which profile a tab belongs to
+- **`cleanup.status` shows Chrome instance info** — name, port, User Data dir
+
+### Changed
+- **WebSocket close handler** clears `activeConnectionInfo` and `overrideUserDataDir` on disconnect
+- **`connectBrowser()` open handler** auto-detects connection info by matching against discovered instances
+
+---
+
 ## [4.4.0] — 2026-03-06
 
 ### Added — Session Exclusivity & Configurable Auto-Cleanup

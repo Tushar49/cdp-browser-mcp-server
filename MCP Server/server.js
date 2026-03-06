@@ -102,6 +102,9 @@ function autoCleanupTempFiles() {
 // ─── Browser Connection ─────────────────────────────────────────────
 
 let browserWs = null;
+let overrideUserDataDir = null;         // browser.connect override — takes priority in getWsUrl()
+let activeConnectionInfo = null;         // { name, userDataDir, port, wsUrl }
+let lastResolvedUserDataDir = null;      // tracks which User Data dir getWsUrl() resolved from
 let nextId = 1;
 const callbacks = new Map();            // msgId → { resolve, reject }
 const activeSessions = new Map();       // targetId → sessionId
@@ -145,6 +148,7 @@ const NETWORK_PRESETS = {
 
 function getWsUrl() {
   const paths = [
+    overrideUserDataDir,  // browser.connect override — takes priority
     process.env.CDP_USER_DATA,
     join(process.env.LOCALAPPDATA || "", "Google", "Chrome", "User Data"),
   ].filter(Boolean);
@@ -152,10 +156,62 @@ function getWsUrl() {
     try {
       const c = readFileSync(join(p, "DevToolsActivePort"), "utf8");
       const lines = c.trim().split("\n");
+      lastResolvedUserDataDir = p;
       return `ws://127.0.0.1:${lines[0]}${lines[1]}`;
     } catch { /* next */ }
   }
+  lastResolvedUserDataDir = null;
   return `ws://${CDP_HOST}:${CDP_PORT}/devtools/browser/`;
+}
+
+/**
+ * Discover running Chrome instances by scanning known User Data directories
+ * for DevToolsActivePort files + reading Local State for profile names.
+ */
+function discoverChromeInstances() {
+  const candidates = [
+    { name: "Chrome", path: join(process.env.LOCALAPPDATA || "", "Google", "Chrome", "User Data") },
+    { name: "Chrome Beta", path: join(process.env.LOCALAPPDATA || "", "Google", "Chrome Beta", "User Data") },
+    { name: "Chrome Canary", path: join(process.env.LOCALAPPDATA || "", "Google", "Chrome SxS", "User Data") },
+    { name: "Chromium", path: join(process.env.LOCALAPPDATA || "", "Chromium", "User Data") },
+  ];
+  if (process.env.CDP_USER_DATA) {
+    candidates.unshift({ name: "Custom", path: process.env.CDP_USER_DATA });
+  }
+
+  const instances = [];
+  for (const { name, path: udPath } of candidates) {
+    try {
+      const portFile = readFileSync(join(udPath, "DevToolsActivePort"), "utf8").trim();
+      const lines = portFile.split("\n");
+      const port = parseInt(lines[0]);
+      const wsPath = lines[1];
+
+      // Read profile names from Local State
+      let profiles = [];
+      try {
+        const localState = JSON.parse(readFileSync(join(udPath, "Local State"), "utf8"));
+        const cache = localState?.profile?.info_cache || {};
+        profiles = Object.entries(cache).map(([dir, info]) => ({
+          directory: dir,
+          name: info.name || dir,
+          gaiaName: info.gaia_name || "",
+          email: info.user_name || "",
+        }));
+      } catch { /* Local State may not exist or be readable */ }
+
+      instances.push({
+        name,
+        userDataDir: udPath,
+        port,
+        wsPath,
+        wsUrl: `ws://127.0.0.1:${port}${wsPath}`,
+        profiles,
+        connected: browserWs?.url === `ws://127.0.0.1:${port}${wsPath}`,
+      });
+    } catch { /* no DevToolsActivePort — Chrome not running with this user-data-dir */ }
+  }
+  return instances;
 }
 
 // ─── Browser Connection ─────────────────────────────────────────────
@@ -165,7 +221,25 @@ function connectBrowser() {
   return new Promise((resolve, reject) => {
     const wsUrl = getWsUrl();
     browserWs = new WebSocket(wsUrl, { perMessageDeflate: false });
-    browserWs.once("open", () => { startHealthCheck(); resolve(); });
+    browserWs.once("open", () => {
+      startHealthCheck();
+      // Auto-detect which Chrome instance we connected to
+      if (!activeConnectionInfo) {
+        const wsUrl = browserWs.url;
+        const instances = discoverChromeInstances();
+        const match = instances.find(i => i.wsUrl === wsUrl);
+        if (match) {
+          activeConnectionInfo = { name: match.name, userDataDir: match.userDataDir, port: match.port, wsUrl };
+        } else {
+          const portMatch = wsUrl.match(/:(\d+)/);
+          activeConnectionInfo = { name: "Auto-detected", userDataDir: lastResolvedUserDataDir, port: portMatch ? parseInt(portMatch[1]) : CDP_PORT, wsUrl };
+        }
+      } else {
+        // Always refresh wsUrl — Chrome regenerates the GUID on every restart
+        activeConnectionInfo.wsUrl = browserWs.url;
+      }
+      resolve();
+    });
     browserWs.once("error", () =>
       reject(new Error(
         "Cannot connect to Chrome. Enable remote debugging: " +
@@ -202,6 +276,8 @@ function connectBrowser() {
       lastSnapshots.clear();
       downloads.clear();
       browserWs = null;
+      activeConnectionInfo = null;
+      overrideUserDataDir = null;
       stopHealthCheck();
     });
   });
@@ -1541,6 +1617,39 @@ const TOOLS = [
       required: ["action"],
     },
   },
+
+  // ── 10. browser ──
+  {
+    name: "browser",
+    description: [
+      "Chrome instance and profile management. Detect running Chrome instances, switch connections, and view profile information.",
+      "",
+      "Operations:",
+      "- profiles: List all detected Chrome instances with their profiles, ports, and connection status (no parameters)",
+      "- connect: Switch to a different Chrome instance by name, port, or User Data directory path (requires: instance — name like 'Chrome' or 'Chrome Canary', or port number, or path to User Data dir)",
+      "- active: Show the currently connected Chrome instance, port, profiles, and WebSocket URL (no parameters)",
+      "",
+      "Notes:",
+      "- All Chrome profiles within one instance share a single debug port — you cannot connect to a specific profile, only to an instance",
+      "- Each profile's tabs are distinguishable via browserContextId in tab info",
+      "- Switching instances requires no other active agent sessions (use cleanup.session to end them first)",
+      "- Set CDP_PROFILE env var to auto-connect to a specific User Data directory at startup",
+    ].join("\n"),
+    annotations: {
+      title: "Browser Instance",
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: false,
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["profiles", "connect", "active"], description: "Browser action." },
+        instance: { type: "string", description: "Chrome instance to connect to — name (e.g. 'Chrome Canary'), port number, or User Data directory path." },
+      },
+      required: ["action"],
+    },
+  },
 ];
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1609,9 +1718,11 @@ async function handleTabsInfo(args) {
   const sid = activeSessions.get(args.tabId);
   const consoleCount = sid ? (consoleLogs.get(sid)?.length || 0) : 0;
   const netCount = sid ? (networkReqs.get(sid)?.size || 0) : 0;
+  const contextId = tab.browserContextId ? `\nProfile context: ${tab.browserContextId}` : "";
   return ok(
-    `Tab: ${tab.title}\nURL: ${tab.url}\nID: ${tab.targetId}\n` +
-    `Session: ${connected ? "active" : "not connected"}\n` +
+    `Tab: ${tab.title}\nURL: ${tab.url}\nID: ${tab.targetId}` +
+    contextId +
+    `\nSession: ${connected ? "active" : "not connected"}\n` +
     `Console: ${consoleCount} messages | Network: ${netCount} requests`
   );
 }
@@ -3188,6 +3299,122 @@ async function handleInterceptList(args) {
   return ok(`${pending.size} pending request(s):\n\n${lines.join("\n")}`);
 }
 
+// ─── Browser Handlers ───────────────────────────────────────────────
+
+async function handleBrowserProfiles() {
+  const instances = discoverChromeInstances();
+  if (!instances.length) {
+    return ok("No Chrome instances found with remote debugging enabled.\nLaunch Chrome with --remote-debugging-port=9222 or enable chrome://flags/#enable-remote-debugging");
+  }
+  const sections = instances.map(inst => {
+    const connTag = inst.connected ? " [CONNECTED]" : "";
+    let section = `${inst.name}${connTag}\n  Port: ${inst.port}\n  User Data: ${inst.userDataDir}`;
+    if (inst.profiles.length) {
+      section += `\n  Profiles (${inst.profiles.length}):`;
+      for (const p of inst.profiles) {
+        const email = p.email ? ` (${p.email})` : "";
+        section += `\n    ${p.directory}: ${p.name}${email}`;
+      }
+    }
+    return section;
+  });
+  return ok(`Chrome instances: ${instances.length}\n\n${sections.join("\n\n")}`);
+}
+
+async function handleBrowserConnect(args) {
+  if (!args.instance) return fail("Provide 'instance' — name (e.g. 'Chrome'), port number (e.g. '9333'), or User Data directory path.");
+
+  // Guard: reject if other agent sessions are active
+  const otherSessions = [...agentSessions.entries()].filter(([id]) => id !== args._agentSessionId);
+  const activeSids = otherSessions.filter(([, s]) => s.tabIds.size > 0);
+  if (activeSids.length > 0) {
+    const ids = activeSids.map(([id, s]) => `${id.substring(0, 8)}… (${s.tabIds.size} tabs)`).join(", ");
+    return fail(`Cannot switch — ${activeSids.length} other session(s) with active tabs: ${ids}. End them first with cleanup.session.`);
+  }
+
+  // Find the target instance
+  const instances = discoverChromeInstances();
+  const input = args.instance.toString().trim();
+  const target = instances.find(inst =>
+    inst.name.toLowerCase() === input.toLowerCase() ||
+    inst.port.toString() === input ||
+    inst.userDataDir.toLowerCase() === input.toLowerCase()
+  );
+  if (!target) {
+    const available = instances.map(i => `${i.name} (port ${i.port})`).join(", ") || "none found";
+    return fail(`Chrome instance "${input}" not found. Available: ${available}`);
+  }
+  if (target.connected) {
+    return ok(`Already connected to ${target.name} (port ${target.port}).`);
+  }
+
+  // Clear caller's session state — tabs from old browser are invalid
+  const callerSession = agentSessions.get(args._agentSessionId);
+  if (callerSession) {
+    callerSession.tabIds.clear();
+    agentSessions.delete(args._agentSessionId);
+  }
+  tabLocks.clear();
+  agentSessions.clear();
+
+  // Disconnect current browser — wait for close event, not a blind timer
+  if (browserWs && browserWs.readyState !== WebSocket.CLOSED) {
+    const oldWs = browserWs;
+    await new Promise(resolve => {
+      oldWs.once("close", resolve);
+      oldWs.close();
+    });
+  }
+
+  // Connect to new instance — override the User Data dir, NOT the full WS URL
+  overrideUserDataDir = target.userDataDir;
+  await connectBrowser();
+  activeConnectionInfo = { name: target.name, userDataDir: target.userDataDir, port: target.port, wsUrl: browserWs?.url };
+
+  return ok(`Connected to ${target.name}\nPort: ${target.port}\nUser Data: ${target.userDataDir}\nProfiles: ${target.profiles.map(p => p.name).join(", ") || "unknown"}`);
+}
+
+async function handleBrowserActive() {
+  if (!browserWs || browserWs.readyState !== WebSocket.OPEN) {
+    return ok("Not connected to any Chrome instance.");
+  }
+
+  const info = activeConnectionInfo || {};
+  let text = `Connected to: ${info.name || "unknown"}\n`;
+  text += `Port: ${info.port || "unknown"}\n`;
+  text += `User Data: ${info.userDataDir || "unknown"}\n`;
+  text += `WebSocket: ${info.wsUrl || browserWs.url || "unknown"}\n`;
+  text += `Health: ${connectionHealth.status}\n`;
+
+  // Show profiles from Local State
+  if (info.userDataDir) {
+    try {
+      const localState = JSON.parse(readFileSync(join(info.userDataDir, "Local State"), "utf8"));
+      const cache = localState?.profile?.info_cache || {};
+      const profiles = Object.entries(cache).map(([dir, p]) => `${p.name || dir}${p.user_name ? ` (${p.user_name})` : ""}`);
+      if (profiles.length) text += `Profiles: ${profiles.join(", ")}\n`;
+    } catch { /* ok */ }
+  }
+
+  // Show tab count per browserContextId (profile grouping)
+  try {
+    const { targetInfos } = await cdp("Target.getTargets", { filter: [{ type: "page" }] });
+    if (targetInfos?.length) {
+      const byContext = {};
+      for (const t of targetInfos) {
+        const ctx = t.browserContextId || "default";
+        byContext[ctx] = (byContext[ctx] || 0) + 1;
+      }
+      text += `\nTabs by profile context:\n`;
+      for (const [ctx, count] of Object.entries(byContext)) {
+        text += `  ${ctx.substring(0, 12)}… — ${count} tab(s)\n`;
+      }
+    }
+  } catch { /* ok */ }
+
+  return ok(text);
+}
+
 // ─── Cleanup Handlers ───────────────────────────────────────────────
 
 async function handleCleanupDisconnectTab(args) {
@@ -3271,12 +3498,16 @@ async function handleCleanupSession(args) {
 
 async function handleCleanupStatus() {
   const tabs = await getTabs();
+  const connInfo = activeConnectionInfo
+    ? `Chrome instance: ${activeConnectionInfo.name} (port ${activeConnectionInfo.port})\n  User Data: ${activeConnectionInfo.userDataDir}`
+    : `Chrome instance: auto-detected (port ${CDP_PORT})`;
   const tabList = tabs.slice(0, 10).map(t => {
     const c = activeSessions.has(t.targetId) ? " [connected]" : "";
     return `  ${t.targetId}${c} — ${t.title || "(untitled)"}`;
   }).join("\n");
   const more = tabs.length > 10 ? `\n  ... and ${tabs.length - 10} more` : "";
   return ok(
+    `${connInfo}\n` +
     `Browser tabs: ${tabs.length}\n` +
     `Connected sessions: ${activeSessions.size}\n` +
     `Pending dialogs: ${[...pendingDialogs.values()].reduce((s, d) => s + d.length, 0)}\n` +
@@ -3365,6 +3596,11 @@ const HANDLERS = {
     status: handleCleanupStatus,
     list_sessions: handleCleanupListSessions,
     session: handleCleanupSession,
+  },
+  browser: {
+    profiles: handleBrowserProfiles,
+    connect: handleBrowserConnect,
+    active: handleBrowserActive,
   },
 };
 
@@ -3502,7 +3738,7 @@ function appendConsoleErrors(result, tabId) {
 // ─── MCP Server Setup ───────────────────────────────────────────────
 
 const server = new Server(
-  { name: "cdp-browser", version: "4.4.0" },
+  { name: "cdp-browser", version: "4.5.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -3521,6 +3757,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 setInterval(async () => {
   try { await sweepStaleSessions(); } catch { /* ok */ }
 }, 60_000); // sweep every 60s
+
+// ─── CDP_PROFILE Auto-Connect ──────────────────────────────────────────
+
+if (process.env.CDP_PROFILE) {
+  const instances = discoverChromeInstances();
+  const target = instances.find(i =>
+    i.name.toLowerCase() === process.env.CDP_PROFILE.toLowerCase() ||
+    i.userDataDir.toLowerCase() === process.env.CDP_PROFILE.toLowerCase()
+  );
+  if (target) {
+    overrideUserDataDir = target.userDataDir;
+    activeConnectionInfo = { name: target.name, userDataDir: target.userDataDir, port: target.port, wsUrl: target.wsUrl };
+  }
+}
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
