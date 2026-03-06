@@ -1000,6 +1000,25 @@ async function checkActionability(sessionId, uid, selector) {
   return el;
 }
 
+/**
+ * Retry a function until it succeeds or timeout expires.
+ * Used to wrap element resolution + actionability checks for Playwright-style auto-waiting.
+ * @param {Function} fn - async function to retry
+ * @param {object} opts - { timeout: 5000, interval: 200 }
+ */
+async function withRetry(fn, { timeout = 5000, interval = 200 } = {}) {
+  const deadline = Date.now() + timeout;
+  let lastError;
+  while (true) {
+    try { return await fn(); }
+    catch (e) {
+      lastError = e;
+      if (Date.now() + interval > deadline) throw lastError;
+      await sleep(interval);
+    }
+  }
+}
+
 // ─── Key Mapping ────────────────────────────────────────────────────
 
 const KEY_MAP = {
@@ -1216,7 +1235,7 @@ const TOOLS = [
   {
     name: "page",
     description: [
-      "Page-level operations: navigation, accessibility snapshots, screenshots, content extraction, waiting, PDF export, dialog handling, script injection, and CSP bypass.",
+      "Page-level operations: navigation, accessibility snapshots, screenshots, content extraction, waiting, PDF export, dialog handling, script injection, CSS injection, and CSP bypass.",
       "",
       "Operations:",
       "- goto: Navigate to a URL and wait for page load (requires: tabId, url; optional: waitUntil[load|domcontentloaded|networkidle|commit], timeout)",
@@ -1226,10 +1245,12 @@ const TOOLS = [
       "- snapshot: Capture accessibility tree snapshot with element refs for interaction (requires: tabId)",
       "- screenshot: Take a screenshot of the page or a specific element (requires: tabId; optional: fullPage, quality, uid, type[png|jpeg], path — absolute file path to save to disk)",
       "- content: Extract text or HTML content from the page or an element (requires: tabId; optional: uid, selector, format[text|html])",
+      "- set_content: Set the page's HTML content directly (requires: tabId, html)",
       "- wait: Wait for condition or fixed delay (requires: tabId; provide text, textGone, selector for polling — or just timeout for fixed delay; optional: timeout[ms], state[visible|hidden|attached|detached] for selector waits)",
       "- pdf: Export page as PDF to temp file (requires: tabId; optional: landscape, scale, paperWidth, paperHeight, margin{top,bottom,left,right})",
       "- dialog: Handle a pending JavaScript dialog (alert/confirm/prompt) (requires: tabId; optional: accept[default:true], text for prompt response)",
       "- inject: Inject a script that runs on every new document load (requires: tabId, script)",
+      "- add_style: Inject CSS into the page — either inline content or an external stylesheet URL (requires: tabId, css or cssUrl; optional: persistent — survives navigation)",
       "- bypass_csp: Enable/disable Content Security Policy bypass (requires: tabId; optional: enabled[default:true])",
       "",
       "Notes:",
@@ -1248,7 +1269,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["goto", "back", "forward", "reload", "snapshot", "screenshot", "content", "wait", "pdf", "dialog", "inject", "bypass_csp"], description: "Page action." },
+        action: { type: "string", enum: ["goto", "back", "forward", "reload", "snapshot", "screenshot", "content", "set_content", "wait", "pdf", "dialog", "inject", "add_style", "bypass_csp"], description: "Page action." },
         tabId: { type: "string", description: "Tab ID." },
         url: { type: "string", description: "URL for goto." },
         waitUntil: { type: "string", enum: ["load", "domcontentloaded", "networkidle", "commit"], description: "When to consider navigation complete (default: load). Matches Playwright conventions." },
@@ -1270,6 +1291,10 @@ const TOOLS = [
         paperWidth: { type: "number", description: "PDF paper width in inches." },
         paperHeight: { type: "number", description: "PDF paper height in inches." },
         margin: { type: "object", description: "PDF margins {top, bottom, left, right} in inches.", properties: { top: { type: "number" }, bottom: { type: "number" }, left: { type: "number" }, right: { type: "number" } } },
+        html: { type: "string", description: "HTML content for set_content action." },
+        css: { type: "string", description: "CSS content for add_style action." },
+        cssUrl: { type: "string", description: "URL of external stylesheet for add_style action." },
+        persistent: { type: "boolean", description: "If true, style persists across page navigations (default: false). For add_style action." },
         script: { type: "string", description: "Script for inject action." },
         enabled: { type: "boolean", description: "Enable/disable for bypass_csp." },
         sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
@@ -1284,22 +1309,27 @@ const TOOLS = [
   {
     name: "interact",
     description: [
-      "Element interaction: click, hover, type text, fill forms, select dropdown options, press keys, drag & drop, scroll, upload files, focus elements, and toggle checkboxes.",
+      "Element interaction: click, hover, type text, fill forms, select dropdown options, press keys, drag & drop, scroll, upload files, focus elements, toggle checkboxes, and tap (touch).",
       "",
       "Operations:",
-      "- click: Click an element (requires: tabId, uid or selector; optional: button[left|right|middle], clickCount — use 2 for double-click, modifiers[Control|Shift|Alt|Meta])",
-      "- hover: Hover over an element to trigger tooltips or menus (requires: tabId, uid or selector; optional: modifiers[Control|Shift|Alt|Meta])",
-      "- type: Type text into a focused input field (requires: tabId, text, uid or selector; optional: clear[default:true] — clears field first, submit — press Enter after typing, delay — fixed ms between keystrokes, charDelay — base ms between chars with randomized range [base, base*3] default 200ms, wordDelay — base ms between words with randomized range [base, base*3] default 800ms)",
-      "- fill: Fill multiple form fields in one call (requires: tabId, fields — array of {uid or selector, value, type[text|checkbox|radio|select]})",
-      "- select: Select an option from a <select> dropdown by value or visible text (requires: tabId, value, uid or selector)",
+      "- click: Click an element (requires: tabId, uid or selector; optional: button[left|right|middle], clickCount — use 2 for double-click, modifiers[Control|Shift|Alt|Meta], timeout)",
+      "- hover: Hover over an element to trigger tooltips or menus (requires: tabId, uid or selector; optional: modifiers[Control|Shift|Alt|Meta], timeout)",
+      "- type: Type text into a focused input field (requires: tabId, text, uid or selector; optional: clear[default:true] — clears field first, submit — press Enter after typing, delay — fixed ms between keystrokes, charDelay — base ms between chars with randomized range [base, base*3] default 200ms, wordDelay — base ms between words with randomized range [base, base*3] default 800ms, timeout)",
+      "- fill: Fill multiple form fields in one call (requires: tabId, fields — array of {uid or selector, value, type[text|checkbox|radio|select]}; optional: timeout)",
+      "- select: Select an option from a <select> dropdown by value or visible text (requires: tabId, value, uid or selector; optional: timeout)",
       "- press: Press a keyboard key with optional modifiers (requires: tabId, key; optional: modifiers[Control|Shift|Alt|Meta])",
-      "- drag: Drag an element to another element (requires: tabId, sourceUid or sourceSelector, targetUid or targetSelector)",
-      "- scroll: Scroll the page or a specific element (requires: tabId; optional: direction[up|down|left|right], amount[default:400px], x, y for absolute scroll, uid or selector for scrolling within an element)",
-      "- upload: Upload files to a file input (requires: tabId, files — array of absolute file paths, uid or selector)",
-      "- focus: Focus an element and scroll it into view (requires: tabId, uid or selector)",
-      "- check: Set a checkbox to checked or unchecked (requires: tabId, checked[true|false], uid or selector)",
+      "- drag: Drag an element to another element (requires: tabId, sourceUid or sourceSelector, targetUid or targetSelector; optional: timeout)",
+      "- scroll: Scroll the page or a specific element (requires: tabId; optional: direction[up|down|left|right], amount[default:400px], x, y for absolute scroll, uid or selector for scrolling within an element, timeout)",
+      "- upload: Upload files to a file input (requires: tabId, files — array of absolute file paths, uid or selector; optional: timeout)",
+      "- focus: Focus an element and scroll it into view (requires: tabId, uid or selector; optional: timeout)",
+      "- check: Set a checkbox to checked or unchecked (requires: tabId, checked[true|false], uid or selector; optional: timeout)",
+      "- tap: Tap an element using touch events (requires: tabId, uid or selector; optional: timeout)",
       "",
       "Element Resolution: Provide either 'uid' (from a snapshot) or 'selector' (CSS selector). UIDs are preferred — they come from the accessibility snapshot and map to visible, interactive elements.",
+      "",
+      "Frame interaction: Use 'uid' from snapshots to interact with elements inside iframes — CSS selectors only find top-level elements. Snapshot includes iframe content with [frame N] prefixes.",
+      "",
+      "Auto-retry: All actions automatically retry element resolution and actionability checks until the element is found+actionable or timeout expires (default: 5000ms). Use 'timeout' to customize.",
       "",
       "Keys for press: Enter, Tab, Escape, Backspace, Delete, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Home, End, PageUp, PageDown, Space, F1-F12, Insert",
     ].join("\n"),
@@ -1312,7 +1342,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["click", "hover", "type", "fill", "select", "press", "drag", "scroll", "upload", "focus", "check"], description: "Interaction action." },
+        action: { type: "string", enum: ["click", "hover", "type", "fill", "select", "press", "drag", "scroll", "upload", "focus", "check", "tap"], description: "Interaction action." },
         tabId: { type: "string", description: "Tab ID." },
         uid: { type: "number", description: "Element uid from snapshot." },
         selector: { type: "string", description: "CSS selector." },
@@ -1338,6 +1368,7 @@ const TOOLS = [
         y: { type: "number", description: "Scroll-to Y position." },
         files: { type: "array", items: { type: "string" }, description: "File paths for upload." },
         checked: { type: "boolean", description: "Desired checked state for check action." },
+        timeout: { type: "number", description: "Retry timeout in ms for element resolution and actionability (default: 5000ms). Element is polled until found+actionable or timeout." },
         sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
         cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs, 'detach' keeps them, 'none' skips cleanup. Sticky per session." },
         exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
@@ -2205,11 +2236,61 @@ async function handlePageBypassCsp(args) {
   return ok(`Content Security Policy bypass: ${enabled ? "enabled" : "disabled"}`);
 }
 
+async function handlePageSetContent(args) {
+  if (!args.html) return fail("Provide 'html' content.");
+  const sess = await getTabSession(args.tabId);
+  await ensureDomain(sess, "Page");
+
+  // Get the root frame ID
+  const { frameTree } = await cdp("Page.getFrameTree", {}, sess);
+  const frameId = frameTree.frame.id;
+
+  await cdp("Page.setDocumentContent", { frameId, html: args.html }, sess);
+
+  // Wait for the content to be ready
+  await sleep(200);
+
+  return ok(`Page content set (${args.html.length} chars).`);
+}
+
+async function handlePageAddStyle(args) {
+  if (!args.css && !args.cssUrl) return fail("Provide 'css' (inline content) or 'cssUrl' (external stylesheet URL).");
+  const sess = await getTabSession(args.tabId);
+
+  if (args.persistent) {
+    // Use Page.addScriptToEvaluateOnNewDocument to inject CSS on every load.
+    // IMPORTANT: addScriptToEvaluateOnNewDocument runs before DOM is constructed,
+    // so document.head may be null. Must defer to DOMContentLoaded if head doesn't exist yet.
+    await ensureDomain(sess, "Page");
+    const code = args.css
+      ? `(() => { const s = document.createElement('style'); s.textContent = ${JSON.stringify(args.css)}; const insert = () => (document.head || document.documentElement).appendChild(s); if (document.head) insert(); else document.addEventListener('DOMContentLoaded', insert); })()`
+      : `(() => { const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = ${JSON.stringify(args.cssUrl)}; const insert = () => (document.head || document.documentElement).appendChild(l); if (document.head) insert(); else document.addEventListener('DOMContentLoaded', insert); })()`;
+    const { identifier } = await cdp("Page.addScriptToEvaluateOnNewDocument", { source: code }, sess);
+    // Also execute immediately on current page (head exists here since page is already loaded)
+    await cdp("Runtime.evaluate", { expression: code }, sess);
+    const scripts = injectedScripts.get(sess) || [];
+    scripts.push({ identifier, description: `[CSS] ${(args.css || args.cssUrl).substring(0, 60)}` });
+    injectedScripts.set(sess, scripts);
+    return ok(`Style injected (persistent, id: ${identifier}).`);
+  }
+
+  // Non-persistent — inject into current page only
+  const code = args.css
+    ? `(() => { const s = document.createElement('style'); s.textContent = ${JSON.stringify(args.css)}; document.head.appendChild(s); return { ok: true }; })()`
+    : `(() => { const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = ${JSON.stringify(args.cssUrl)}; document.head.appendChild(l); return { ok: true }; })()`;
+
+  const result = await cdp("Runtime.evaluate", { expression: code, returnByValue: true }, sess);
+  if (result.exceptionDetails) return fail("Failed to inject style: " + (result.exceptionDetails.exception?.description || "unknown error"));
+
+  return ok(`Style injected${args.css ? ` (${args.css.length} chars)` : ` (${args.cssUrl})`}.`);
+}
+
 // ─── Interact Handlers ──────────────────────────────────────────────
 
 async function handleInteractClick(args) {
   const sess = await getTabSession(args.tabId);
-  const el = await checkActionability(sess, args.uid, args.selector);
+  const retryTimeout = args.timeout || 5000;
+  const el = await withRetry(() => checkActionability(sess, args.uid, args.selector), { timeout: retryTimeout });
   const button = args.button || "left";
   const clicks = args.clickCount || 1;
   // CDP buttons bitmask: 1=left, 2=right, 4=middle
@@ -2315,7 +2396,8 @@ async function handleInteractClick(args) {
 
 async function handleInteractHover(args) {
   const sess = await getTabSession(args.tabId);
-  const el = await resolveElement(sess, args.uid, args.selector);
+  const retryTimeout = args.timeout || 5000;
+  const el = await withRetry(() => resolveElement(sess, args.uid, args.selector), { timeout: retryTimeout });
   const mods = modifierFlags(args.modifiers);
   await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: el.x, y: el.y, modifiers: mods }, sess);
   return ok(`Hovering over <${el.tag}> "${el.label}" at (${Math.round(el.x)}, ${Math.round(el.y)})`);
@@ -2324,6 +2406,8 @@ async function handleInteractHover(args) {
 async function handleInteractType(args) {
   if (!args.text) return fail("Provide 'text' to type.");
   const sess = await getTabSession(args.tabId);
+  const retryTimeout = args.timeout || 5000;
+  await withRetry(() => checkActionability(sess, args.uid, args.selector), { timeout: retryTimeout });
   const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
   const clearCode = args.clear !== false
     ? `if ('value' in this) {
@@ -2406,11 +2490,13 @@ async function handleInteractType(args) {
 async function handleInteractFill(args) {
   if (!args.fields?.length) return fail("Provide 'fields' array.");
   const sess = await getTabSession(args.tabId);
+  const retryTimeout = args.timeout || 5000;
   const results = [];
 
   const { networkEvents } = await waitForCompletion(sess, async () => {
     for (const field of args.fields) {
       try {
+        await withRetry(() => checkActionability(sess, field.uid, field.selector), { timeout: retryTimeout });
         const objectId = await resolveElementObjectId(sess, field.uid, field.selector);
         const fieldType = field.type || "text";
         const r = await cdp("Runtime.callFunctionOn", {
@@ -2465,6 +2551,8 @@ async function handleInteractFill(args) {
 async function handleInteractSelect(args) {
   if (!args.value) return fail("Provide 'value' to select.");
   const sess = await getTabSession(args.tabId);
+  const retryTimeout = args.timeout || 5000;
+  await withRetry(() => checkActionability(sess, args.uid, args.selector), { timeout: retryTimeout });
   const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
 
   const { networkEvents } = await waitForCompletion(sess, async () => {
@@ -2568,8 +2656,9 @@ async function handleInteractPress(args) {
 
 async function handleInteractDrag(args) {
   const sess = await getTabSession(args.tabId);
-  const src = await resolveElement(sess, args.sourceUid, args.sourceSelector);
-  const tgt = await resolveElement(sess, args.targetUid, args.targetSelector);
+  const retryTimeout = args.timeout || 5000;
+  const src = await withRetry(() => resolveElement(sess, args.sourceUid, args.sourceSelector), { timeout: retryTimeout });
+  const tgt = await withRetry(() => resolveElement(sess, args.targetUid, args.targetSelector), { timeout: retryTimeout });
 
   await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: src.x, y: src.y }, sess);
   await sleep(50);
@@ -2589,13 +2678,14 @@ async function handleInteractDrag(args) {
 async function handleInteractScroll(args) {
   const sess = await getTabSession(args.tabId);
   const amount = args.amount || 400;
+  const retryTimeout = args.timeout || 5000;
 
   // scrollTo absolute position
   if (args.x !== undefined || args.y !== undefined) {
     const scrollX = args.x ?? 0;
     const scrollY = args.y ?? 0;
     if (args.uid !== undefined || args.selector) {
-      const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
+      const objectId = await withRetry(() => resolveElementObjectId(sess, args.uid, args.selector), { timeout: retryTimeout });
       await cdp("Runtime.callFunctionOn", {
         functionDeclaration: `function() { this.scrollTo({left:${scrollX},top:${scrollY},behavior:'smooth'}); }`,
         objectId,
@@ -2621,7 +2711,7 @@ async function handleInteractScroll(args) {
   }
 
   if (args.uid !== undefined || args.selector) {
-    const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
+    const objectId = await withRetry(() => resolveElementObjectId(sess, args.uid, args.selector), { timeout: retryTimeout });
     await cdp("Runtime.callFunctionOn", {
       functionDeclaration: `function() { this.scrollBy({left:${deltaX},top:${deltaY},behavior:'smooth'}); }`,
       objectId,
@@ -2639,9 +2729,10 @@ async function handleInteractScroll(args) {
 async function handleInteractUpload(args) {
   if (!args.files?.length) return fail("Provide 'files' array with absolute file paths.");
   const sess = await getTabSession(args.tabId);
+  const retryTimeout = args.timeout || 5000;
 
-  // Resolve element via resolveElementObjectId
-  const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
+  // Resolve element via resolveElementObjectId with retry
+  const objectId = await withRetry(() => resolveElementObjectId(sess, args.uid, args.selector), { timeout: retryTimeout });
 
   // Describe node to get backendNodeId for setFileInputFiles
   const { node } = await cdp("DOM.describeNode", { objectId }, sess);
@@ -2652,7 +2743,8 @@ async function handleInteractUpload(args) {
 
 async function handleInteractFocus(args) {
   const sess = await getTabSession(args.tabId);
-  const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
+  const retryTimeout = args.timeout || 5000;
+  const objectId = await withRetry(() => resolveElementObjectId(sess, args.uid, args.selector), { timeout: retryTimeout });
   const result = await cdp("Runtime.callFunctionOn", {
     functionDeclaration: `function() {
       this.scrollIntoView({ block: "center" });
@@ -2670,6 +2762,8 @@ async function handleInteractFocus(args) {
 async function handleInteractCheck(args) {
   if (args.checked === undefined) return fail("Provide 'checked' (true/false).");
   const sess = await getTabSession(args.tabId);
+  const retryTimeout = args.timeout || 5000;
+  await withRetry(() => checkActionability(sess, args.uid, args.selector), { timeout: retryTimeout });
   const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
 
   const { networkEvents } = await waitForCompletion(sess, async () => {
@@ -2692,6 +2786,28 @@ async function handleInteractCheck(args) {
   });
 
   let msg = `Checkbox: ${args.checked ? "checked" : "unchecked"}`;
+  if (networkEvents.length) msg += "\n\nNetwork activity:\n" + networkEvents.join("\n");
+  return ok(msg);
+}
+
+async function handleInteractTap(args) {
+  const sess = await getTabSession(args.tabId);
+  const retryTimeout = args.timeout || 5000;
+  const el = await withRetry(() => checkActionability(sess, args.uid, args.selector), { timeout: retryTimeout });
+
+  const { networkEvents } = await waitForCompletion(sess, async () => {
+    await cdp("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x: Math.round(el.x), y: Math.round(el.y) }],
+    }, sess);
+    await sleep(50);
+    await cdp("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    }, sess);
+  });
+
+  let msg = `Tapped <${el.tag}> "${el.label}" at (${Math.round(el.x)}, ${Math.round(el.y)})`;
   if (networkEvents.length) msg += "\n\nNetwork activity:\n" + networkEvents.join("\n");
   return ok(msg);
 }
@@ -3545,7 +3661,9 @@ const HANDLERS = {
     pdf: handlePagePdf,
     dialog: handlePageDialog,
     inject: handlePageInject,
+    add_style: handlePageAddStyle,
     bypass_csp: handlePageBypassCsp,
+    set_content: handlePageSetContent,
   },
   interact: {
     click: handleInteractClick,
@@ -3559,6 +3677,7 @@ const HANDLERS = {
     upload: handleInteractUpload,
     focus: handleInteractFocus,
     check: handleInteractCheck,
+    tap: handleInteractTap,
   },
   execute: {
     eval: handleExecuteEval,
@@ -3738,7 +3857,7 @@ function appendConsoleErrors(result, tabId) {
 // ─── MCP Server Setup ───────────────────────────────────────────────
 
 const server = new Server(
-  { name: "cdp-browser", version: "4.5.0" },
+  { name: "cdp-browser", version: "4.6.0" },
   { capabilities: { tools: {} } }
 );
 

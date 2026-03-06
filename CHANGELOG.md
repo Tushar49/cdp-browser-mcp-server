@@ -2,6 +2,22 @@
 
 All notable changes to CDP Browser MCP Server will be documented in this file.
 
+## [4.6.0] — 2026-03-06
+
+### Added — Playwright Audit Priority A
+
+Auto-retry with actionability checks, new page actions (`set_content`, `add_style`), touch events (`tap`), and frame interaction documentation.
+
+### Added
+- **`withRetry(fn, opts)` helper** — retries an async function until success or timeout (default 5000ms, 200ms interval). Used to wrap element resolution and actionability checks for Playwright-style auto-waiting
+- **Auto-retry on ALL interact actions** — `click`, `hover`, `type`, `fill`, `select`, `drag`, `scroll`, `upload`, `focus`, `check`, `tap` all retry element resolution until found+actionable or `timeout` expires
+- **`checkActionability` applied to all mutating actions** — previously only `click` checked visibility/disabled/size. Now `type`, `fill`, `select`, `check`, `tap`, `drag`, `upload`, `focus` all check actionability. `hover` and `scroll` use `resolveElement` retry (no actionability required, matching Playwright)
+- **`timeout` parameter on `interact` tool** — configurable retry timeout per action (default: 5000ms). Matches Playwright's `locator.click({ timeout })` pattern
+- **`page.set_content` action** — set page HTML content directly via `Page.setDocumentContent` (like Playwright's `page.setContent()`)
+- **`page.add_style` action** — inject CSS into page via inline `css` or external `cssUrl`. Optional `persistent: true` survives page navigations via `Page.addScriptToEvaluateOnNewDocument` with DOMContentLoaded fallback for early execution safety
+- **`interact.tap` action** — tap elements using `Input.dispatchTouchEvent` (touchStart + touchEnd). Includes actionability checks and auto-retry
+- **Frame interaction docs** — interact tool description updated to document that uid refs from snapshots work cross-frame (via `DOM.resolveNode({ backendNodeId })`), while CSS selectors only find top-level elements
+
 ## [4.5.0] — 2026-03-06
 
 ### Added — Chrome Profile & Instance Selection
