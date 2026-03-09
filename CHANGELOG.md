@@ -2,6 +2,29 @@
 
 All notable changes to CDP Browser MCP Server will be documented in this file.
 
+## [4.8.0] — 2026-03-10
+
+### Added — Security Hardening & Tab Origin Tracking
+
+Session ID opacity, session-scoped temp files, tab origin tracking (`created` vs `claimed`), and master reset.
+
+### Added
+- **Tab origin tracking** — `tabLocks` now stores `{ sessionId, origin }` objects instead of bare session ID strings. Origin is `"created"` (opened via `tabs.new`) or `"claimed"` (pre-existing browser tab first referenced by a session)
+- **`cleanup.reset` action** — master-clear that terminates ALL sessions and releases all tab locks. `closeTabs: true` closes agent-created tabs; pre-existing (claimed) tabs are **never** closed, always preserved
+- **Origin-aware cleanup** — `cleanup.session`, TTL sweep (`sweepStaleSessions`), and `cleanup.reset` all respect tab origin: `claimed` tabs are detached only (never closed regardless of cleanup strategy), `created` tabs follow the configured strategy
+- **`cleanup.list_sessions` origin tags** — tab listings now show `(created)` or `(claimed)` next to each tab for visibility into what would be preserved vs closed on reset
+- **`closeTabs` parameter** on `cleanup.reset` — boolean flag to optionally close created tabs (default: false, detach only)
+
+### Security
+- **Session ID opacity** — session UUIDs are now treated as credentials and never exposed in full. All output paths truncate to first 8 chars: `cleanup.list_sessions`, `cleanup.session` response, `tabs.list` lock tags, `browser.connect` rejection messages
+- **Session-scoped temp file cleanup** — `writeTempFile` accepts an optional session prefix; `handlePagePdf` and `handleObserveRequest` prefix filenames with session ID substring. `cleanup.clean_temp` only deletes the caller's prefixed files + unprefixed legacy files. Other sessions' temp artifacts are preserved
+- **`cleanup.session` fail message** — no longer leaks the session ID
+
+### Changed
+- **`tabLocks` refactored** from `Map<tabId, string>` to `Map<tabId, { sessionId, origin }>` — all ~11 read sites updated to use `?.sessionId` optional chaining
+- **`cleanup.disconnect_tab`** — plan snippet corrected to match hardened server code (no `exclusive:false` bypass for destructive ops)
+- **Bump version to 4.8.0**
+
 ## [4.7.0] — 2026-03-07
 
 ### Added — Human-Like Interaction Consolidation

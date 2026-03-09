@@ -4164,7 +4164,7 @@ function appendConsoleErrors(result, tabId) {
 // ─── MCP Server Setup ───────────────────────────────────────────────
 
 const server = new Server(
-  { name: "cdp-browser", version: "4.7.0" },
+  { name: "cdp-browser", version: "4.8.0" },
   { capabilities: { tools: {} } }
 );
 

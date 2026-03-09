@@ -7,9 +7,9 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-4.7.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-4.8.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/tools-10-green" alt="Tools">
-  <img src="https://img.shields.io/badge/sub--actions-62+-green" alt="Actions">
+  <img src="https://img.shields.io/badge/sub--actions-63+-green" alt="Actions">
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen" alt="Node">
   <img src="https://img.shields.io/badge/license-MIT-yellow" alt="License">
 </p>
@@ -310,10 +310,11 @@ Set any combination of properties in a single call:
 |--------|-------------|----------|----------|
 | `disconnect_tab` | Disconnect from a tab | `tabId` | — |
 | `disconnect_all` | Disconnect all sessions | — | — |
-| `clean_temp` | Delete temp files | — | — |
+| `clean_temp` | Delete temp files (session-scoped) | — | — |
 | `status` | Server status | — | — |
-| `list_sessions` | List agent sessions with details | — | — |
-| `session` | End a session, cleanup owned tabs | — | `targetSessionId`, `cleanupStrategy` |
+| `list_sessions` | List agent sessions with origin tags | — | — |
+| `session` | End caller's session, cleanup owned tabs | — | `cleanupStrategy` |
+| `reset` | Terminate ALL sessions. Created tabs optionally closed; pre-existing tabs always preserved | — | `closeTabs` |
 
 ### `browser` — Chrome Instance & Profile Management
 
@@ -386,10 +387,14 @@ After the first snapshot, subsequent calls return a line-level diff showing only
 
 Multiple AI agents can share the same Chrome instance without interfering. Each server process is **automatically assigned a session** via `crypto.randomUUID()` — no opt-in needed. Each agent gets:
 - **Exclusive tab ownership** — tabs are locked to the session that created/claimed them. Other agents are blocked by default (`exclusive: false` to override)
-- Scoped tab visibility (agent A can’t see agent B’s tabs via `tabs.list`)
+- **Tab origin tracking** — tabs opened via `tabs.new` are tagged `created`; pre-existing browser tabs first referenced by an agent are tagged `claimed`. On cleanup, **claimed tabs are never closed** — only detached. This protects the user's existing browser tabs from agent cleanup
+- Scoped tab visibility (agent A can't see agent B's tabs via `tabs.list`)
 - Independent console/network logs
-- **Configurable cleanup strategy** — `close` (default: removes tabs on expiry), `detach` (keeps tabs open), or `none` (persist indefinitely)
+- **Configurable cleanup strategy** — `close` (default: removes created tabs on expiry), `detach` (keeps tabs open), or `none` (persist indefinitely)
+- **`cleanup.reset`** — master-clear that terminates all sessions. `closeTabs: true` closes agent-created tabs; pre-existing tabs are always preserved
 - TTL-based expiry with full CDP cleanup (default: 5 minutes, configurable via `CDP_SESSION_TTL`)
+- **Session ID security** — session UUIDs are treated as credentials and never returned in full in any output. All diagnostic messages truncate to first 8 characters, making impersonation computationally infeasible (2¹²² possibilities)
+- **Session-scoped temp files** — `cleanup.clean_temp` only deletes the calling session's temp files, preserving other sessions' screenshots and artifacts
 - Use `showAll: true` on `tabs.list` to bypass filtering and see all tabs
 - Use `cleanup.session` to explicitly end a session and clean up its tabs
 
