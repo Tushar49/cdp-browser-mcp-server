@@ -3942,6 +3942,9 @@ async function handleTool(name, args) {
   // Inject session context into args for handlers that need it (e.g. handleTabsNew, handleCleanupSession)
   args._agentSession = session;
   args._agentSessionId = sessionId;
+  // Re-inject stripped values so cleanup handlers can use them for per-call overrides
+  if (cleanupStrategy) args.cleanupStrategy = cleanupStrategy;
+  if (exclusive !== undefined) args.exclusive = exclusive;
 
   // Track tab association with exclusive lock check
   if (args.tabId) {
@@ -4057,6 +4060,8 @@ async function handleTool(name, args) {
   // Strip internal fields before returning
   delete args._agentSession;
   delete args._agentSessionId;
+  delete args.cleanupStrategy;
+  delete args.exclusive;
 
   return appendConsoleErrors(result, args.tabId);
 }
