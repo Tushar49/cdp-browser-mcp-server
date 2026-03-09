@@ -3779,12 +3779,19 @@ async function handleCleanupListSessions() {
 
 /**
  * Explicitly end an agent session and clean up its owned tabs.
- * Borrowed tabs are released without being closed/detached.
+ * Authority: sessions can only terminate themselves. The root session
+ * (processSessionId) can terminate any session — it acts as admin.
+ * This prevents subagent A from killing subagent B's work.
  */
 async function handleCleanupSession(args) {
   const sid = args.targetSessionId || args._agentSessionId;
   const session = agentSessions.get(sid);
   if (!session) return fail(`No session found: ${sid}`);
+
+  // Authority check: only self or root session can terminate
+  if (sid !== args._agentSessionId && args._agentSessionId !== processSessionId) {
+    return fail(`Cannot terminate session ${sid.substring(0, 8)}… — only the session itself or the root session can do this.`);
+  }
 
   const strategy = args.cleanupStrategy || session.cleanupStrategy || "close";
   let cleaned = 0;
