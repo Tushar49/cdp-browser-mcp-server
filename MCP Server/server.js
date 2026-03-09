@@ -1714,7 +1714,7 @@ const TOOLS = [
       "- clean_temp: Delete all temporary files (screenshots, PDFs) created by the server (no parameters)",
       "- status: Show current server status — active sessions, temp file count, connection state (no parameters)",
       "- list_sessions: List all active agent sessions with their TTL, idle time, cleanup strategy, and associated tabs (no parameters)",
-      "- session: Explicitly end an agent session and clean up its owned tabs (optional: targetSessionId, cleanupStrategy)",
+      "- session: Explicitly end this agent session and clean up its owned tabs (optional: cleanupStrategy)",
       "",
       "Session params (all tools): sessionId — agent session ID for tab ownership/isolation; cleanupStrategy — close|detach|none for tab cleanup on expiry (default: close); exclusive — lock tabs to session (default: true)",
     ].join("\n"),
@@ -1729,7 +1729,6 @@ const TOOLS = [
       properties: {
         action: { type: "string", enum: ["disconnect_tab", "disconnect_all", "clean_temp", "status", "list_sessions", "session"], description: "Cleanup action." },
         tabId: { type: "string", description: "Tab ID for disconnect_tab." },
-        targetSessionId: { type: "string", description: "End a specific session by ID (for 'session' action). Default: caller's own session." },
         sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
         cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs from browser, 'detach' keeps them open, 'none' skips cleanup. Sticky per session." },
         exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
@@ -3706,9 +3705,10 @@ async function handleBrowserActive() {
 async function handleCleanupDisconnectTab(args) {
   if (!args.tabId) return fail("Provide 'tabId'.");
   // Only allow disconnecting tabs this session owns or unowned tabs
+  // No exclusive:false override — detaching is destructive (kills CDP session + clears all state)
   const lockOwner = tabLocks.get(args.tabId);
-  if (lockOwner && lockOwner !== args._agentSessionId && args.exclusive !== false) {
-    return fail(`Tab [${args.tabId}] is locked by another session. Use exclusive:false to override.`);
+  if (lockOwner && lockOwner !== args._agentSessionId) {
+    return fail(`Tab [${args.tabId}] is locked by another session. Cannot disconnect.`);
   }
   await detachTab(args.tabId);
   return ok("Detached from tab.");
@@ -3779,19 +3779,16 @@ async function handleCleanupListSessions() {
 
 /**
  * Explicitly end an agent session and clean up its owned tabs.
- * Authority: sessions can only terminate themselves. The root session
- * (processSessionId) can terminate any session — it acts as admin.
- * This prevents subagent A from killing subagent B's work.
+ * Self-terminate only — sessions cannot terminate other sessions.
+ * TTL sweep handles cleanup of expired sessions automatically.
+ * browser.connect wipes all sessions when switching Chrome instances.
  */
 async function handleCleanupSession(args) {
-  const sid = args.targetSessionId || args._agentSessionId;
+  // Always terminate caller's own session — targetSessionId is removed
+  // to prevent cross-session termination in multi-subagent workflows
+  const sid = args._agentSessionId;
   const session = agentSessions.get(sid);
   if (!session) return fail(`No session found: ${sid}`);
-
-  // Authority check: only self or root session can terminate
-  if (sid !== args._agentSessionId && args._agentSessionId !== processSessionId) {
-    return fail(`Cannot terminate session ${sid.substring(0, 8)}… — only the session itself or the root session can do this.`);
-  }
 
   const strategy = args.cleanupStrategy || session.cleanupStrategy || "close";
   let cleaned = 0;
