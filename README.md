@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-4.8.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-4.8.1-blue" alt="Version">
   <img src="https://img.shields.io/badge/tools-10-green" alt="Tools">
   <img src="https://img.shields.io/badge/sub--actions-63+-green" alt="Actions">
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen" alt="Node">

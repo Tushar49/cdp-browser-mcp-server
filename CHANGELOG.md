@@ -2,6 +2,11 @@
 
 All notable changes to CDP Browser MCP Server will be documented in this file.
 
+## [4.8.1] — 2026-03-10
+
+### Performance
+- **Deferred Local State parsing** — `discoverChromeInstances()` now accepts `{ skipProfiles: true }` to skip parsing Chrome's `Local State` JSON (can be 5–20MB on heavy profiles). Used at boot (`CDP_PROFILE` check) and in `connectBrowser()` open handler where only port/wsUrl matching is needed. Profile data is only parsed when `browser.profiles` or `browser.active` explicitly request it.
+
 ## [4.8.0] — 2026-03-10
 
 ### Added — Security Hardening & Tab Origin Tracking

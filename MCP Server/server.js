@@ -167,9 +167,10 @@ function getWsUrl() {
 
 /**
  * Discover running Chrome instances by scanning known User Data directories
- * for DevToolsActivePort files + reading Local State for profile names.
+ * for DevToolsActivePort files + optionally reading Local State for profile names.
+ * @param {{ skipProfiles?: boolean }} opts - skip Local State parsing for faster lookups
  */
-function discoverChromeInstances() {
+function discoverChromeInstances({ skipProfiles = false } = {}) {
   const candidates = [
     { name: "Chrome", path: join(process.env.LOCALAPPDATA || "", "Google", "Chrome", "User Data") },
     { name: "Chrome Beta", path: join(process.env.LOCALAPPDATA || "", "Google", "Chrome Beta", "User Data") },
@@ -188,18 +189,20 @@ function discoverChromeInstances() {
       const port = parseInt(lines[0]);
       const wsPath = lines[1];
 
-      // Read profile names from Local State
+      // Read profile names from Local State (skip when only port/wsUrl matching is needed)
       let profiles = [];
-      try {
-        const localState = JSON.parse(readFileSync(join(udPath, "Local State"), "utf8"));
-        const cache = localState?.profile?.info_cache || {};
-        profiles = Object.entries(cache).map(([dir, info]) => ({
-          directory: dir,
-          name: info.name || dir,
-          gaiaName: info.gaia_name || "",
-          email: info.user_name || "",
-        }));
-      } catch { /* Local State may not exist or be readable */ }
+      if (!skipProfiles) {
+        try {
+          const localState = JSON.parse(readFileSync(join(udPath, "Local State"), "utf8"));
+          const cache = localState?.profile?.info_cache || {};
+          profiles = Object.entries(cache).map(([dir, info]) => ({
+            directory: dir,
+            name: info.name || dir,
+            gaiaName: info.gaia_name || "",
+            email: info.user_name || "",
+          }));
+        } catch { /* Local State may not exist or be readable */ }
+      }
 
       instances.push({
         name,
@@ -227,7 +230,7 @@ function connectBrowser() {
       // Auto-detect which Chrome instance we connected to
       if (!activeConnectionInfo) {
         const wsUrl = browserWs.url;
-        const instances = discoverChromeInstances();
+        const instances = discoverChromeInstances({ skipProfiles: true });
         const match = instances.find(i => i.wsUrl === wsUrl);
         if (match) {
           activeConnectionInfo = { name: match.name, userDataDir: match.userDataDir, port: match.port, wsUrl };
@@ -4164,7 +4167,7 @@ function appendConsoleErrors(result, tabId) {
 // ─── MCP Server Setup ───────────────────────────────────────────────
 
 const server = new Server(
-  { name: "cdp-browser", version: "4.8.0" },
+  { name: "cdp-browser", version: "4.8.1" },
   { capabilities: { tools: {} } }
 );
 
@@ -4187,7 +4190,7 @@ setInterval(async () => {
 // ─── CDP_PROFILE Auto-Connect ──────────────────────────────────────────
 
 if (process.env.CDP_PROFILE) {
-  const instances = discoverChromeInstances();
+  const instances = discoverChromeInstances({ skipProfiles: true });
   const target = instances.find(i =>
     i.name.toLowerCase() === process.env.CDP_PROFILE.toLowerCase() ||
     i.userDataDir.toLowerCase() === process.env.CDP_PROFILE.toLowerCase()
