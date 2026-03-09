@@ -122,7 +122,7 @@ const injectedScripts = new Map();      // sessionId → [ { identifier, descrip
 const refMaps = new Map();              // sessionId → Map<uid, backendNodeId>
 const lastSnapshots = new Map();        // sessionId → { snapshot, url, title }
 const agentSessions = new Map();        // agentSessionId → { lastActivity, tabIds: Set<tabId>, cleanupStrategy: string }
-const tabLocks = new Map();             // tabId → agentSessionId (exclusive ownership)
+const tabLocks = new Map();             // tabId → { sessionId, origin: "created"|"claimed" }
 const processSessionId = randomUUID();  // auto-assigned per-process session ID
 
 const downloads = new Map();              // sessionId → [{guid, url, suggestedFilename, state, receivedBytes, totalBytes}]
@@ -626,8 +626,14 @@ async function sweepStaleSessions() {
       for (const tid of s.tabIds) {
         // Only cleanup tabs this session actually owns (locked to it)
         // Borrowed tabs (exclusive:false) should just be removed from tabIds, not closed/detached
-        if (tabLocks.get(tid) === id) {
-          try { await cleanupTab(tid, s.cleanupStrategy); } catch { /* ok */ }
+        const lock = tabLocks.get(tid);
+        if (lock?.sessionId === id) {
+          if (lock.origin === "claimed") {
+            // Pre-existing tabs: release lock + detach, never close
+            try { await detachTab(tid); } catch { /* ok */ }
+          } else {
+            try { await cleanupTab(tid, s.cleanupStrategy); } catch { /* ok */ }
+          }
         }
       }
       // Clear the session's tabIds (including borrowed refs) and delete session
@@ -1716,6 +1722,7 @@ const TOOLS = [
       "- status: Show current server status — active sessions, temp file count, connection state (no parameters)",
       "- list_sessions: List all active agent sessions with their TTL, idle time, cleanup strategy, and associated tabs (no parameters)",
       "- session: Explicitly end this agent session and clean up its owned tabs (optional: cleanupStrategy)",
+      "- reset: Terminate ALL sessions and release all tab locks. Created tabs can optionally be closed (closeTabs: true), but pre-existing browser tabs are always preserved (optional: closeTabs)",
       "",
       "Session params (all tools): sessionId — agent session ID for tab ownership/isolation; cleanupStrategy — close|detach|none for tab cleanup on expiry (default: close); exclusive — lock tabs to session (default: true)",
     ].join("\n"),
@@ -1728,8 +1735,9 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["disconnect_tab", "disconnect_all", "clean_temp", "status", "list_sessions", "session"], description: "Cleanup action." },
+        action: { type: "string", enum: ["disconnect_tab", "disconnect_all", "clean_temp", "status", "list_sessions", "session", "reset"], description: "Cleanup action." },
         tabId: { type: "string", description: "Tab ID for disconnect_tab." },
+        closeTabs: { type: "boolean", description: "For reset: close tabs created by sessions (default: false). Pre-existing claimed tabs are NEVER closed." },
         sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
         cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs from browser, 'detach' keeps them open, 'none' skips cleanup. Sticky per session." },
         exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
@@ -1784,7 +1792,7 @@ async function handleTabsList(args) {
   const lines = tabs.map((t, i) => {
     const c = activeSessions.has(t.targetId) ? " [connected]" : "";
     const lockOwner = tabLocks.get(t.targetId);
-    const lockTag = lockOwner && lockOwner !== args._agentSessionId ? ` [locked by: ${lockOwner.substring(0, 8)}…]` : "";
+    const lockTag = lockOwner?.sessionId && lockOwner.sessionId !== args._agentSessionId ? ` [locked by: ${lockOwner.sessionId.substring(0, 8)}…]` : "";
     return `${i + 1}. [${t.targetId}]${c}${lockTag}\n   ${t.title}\n   ${t.url}`;
   });
   return ok(`${tabs.length} tab(s):\n\n${lines.join("\n\n")}`);
@@ -1799,7 +1807,7 @@ async function handleTabsFind(args) {
   const lines = hits.map(t => {
     const c = activeSessions.has(t.targetId) ? " [connected]" : "";
     const lockOwner = tabLocks.get(t.targetId);
-    const lockTag = lockOwner && lockOwner !== args._agentSessionId ? ` [locked by: ${lockOwner.substring(0, 8)}…]` : "";
+    const lockTag = lockOwner?.sessionId && lockOwner.sessionId !== args._agentSessionId ? ` [locked by: ${lockOwner.sessionId.substring(0, 8)}…]` : "";
     return `[${t.targetId}]${c}${lockTag} ${t.title}\n   ${t.url}`;
   });
   return ok(`${hits.length} match(es):\n\n${lines.join("\n\n")}`);
@@ -1811,7 +1819,7 @@ async function handleTabsNew(args) {
   // Register ownership immediately so tabs.list shows it right away
   if (args._agentSession) {
     args._agentSession.tabIds.add(targetId);
-    tabLocks.set(targetId, args._agentSessionId);
+    tabLocks.set(targetId, { sessionId: args._agentSessionId, origin: "created" });
   }
   return ok(`New tab: [${targetId}]\nURL: ${url}`);
 }
@@ -1820,7 +1828,7 @@ async function handleTabsClose(args) {
   if (!args.tabId) return fail("Provide 'tabId' to close.");
   // Guard: only allow closing tabs this session owns or unowned tabs
   const lockOwner = tabLocks.get(args.tabId);
-  if (lockOwner && lockOwner !== args._agentSessionId) {
+  if (lockOwner?.sessionId && lockOwner.sessionId !== args._agentSessionId) {
     return fail(`Tab [${args.tabId}] is locked by another session. Cannot close.`);
   }
   await detachTab(args.tabId);
@@ -3709,7 +3717,7 @@ async function handleCleanupDisconnectTab(args) {
   // Only allow disconnecting tabs this session owns or unowned tabs
   // No exclusive:false override — detaching is destructive (kills CDP session + clears all state)
   const lockOwner = tabLocks.get(args.tabId);
-  if (lockOwner && lockOwner !== args._agentSessionId) {
+  if (lockOwner?.sessionId && lockOwner.sessionId !== args._agentSessionId) {
     return fail(`Tab [${args.tabId}] is locked by another session. Cannot disconnect.`);
   }
   await detachTab(args.tabId);
@@ -3723,7 +3731,7 @@ async function handleCleanupDisconnectAll(args) {
   for (const id of ids) {
     // Only disconnect tabs caller owns or unowned tabs
     const lockOwner = tabLocks.get(id);
-    if (!lockOwner || lockOwner === args._agentSessionId) {
+    if (!lockOwner || lockOwner.sessionId === args._agentSessionId) {
       await detachTab(id);
       count++;
     } else {
@@ -3763,13 +3771,15 @@ async function handleCleanupListSessions() {
   for (const [id, s] of agentSessions) {
     const age = ((now - s.lastActivity) / 1000).toFixed(0);
     const ttl = Math.max(0, ((SESSION_TTL - (now - s.lastActivity)) / 1000)).toFixed(0);
-    const ownedTabs = [...s.tabIds].filter(tid => tabLocks.get(tid) === id);
-    const borrowedTabs = [...s.tabIds].filter(tid => tabLocks.get(tid) !== id);
+    const ownedTabs = [...s.tabIds].filter(tid => tabLocks.get(tid)?.sessionId === id);
+    const borrowedTabs = [...s.tabIds].filter(tid => tabLocks.get(tid)?.sessionId !== id);
     let section = `Session: ${id.substring(0, 8)}\u2026\n  Last activity: ${age}s ago | TTL remaining: ${ttl}s\n  Cleanup strategy: ${s.cleanupStrategy || "close"}\n  Owned tabs: ${ownedTabs.length}`;
     if (ownedTabs.length) {
       for (const tid of ownedTabs) {
         const tab = tabMap.get(tid);
-        section += `\n    [${tid}] ${tab ? tab.url : "(unknown)"}`;
+        const lock = tabLocks.get(tid);
+        const originTag = lock ? ` (${lock.origin})` : "";
+        section += `\n    [${tid}]${originTag} ${tab ? tab.url : "(unknown)"}`;
       }
     }
     if (borrowedTabs.length) {
@@ -3804,8 +3814,15 @@ async function handleCleanupSession(args) {
   const strategy = args.cleanupStrategy || session.cleanupStrategy || "close";
   let cleaned = 0;
   for (const tid of session.tabIds) {
-    // Only cleanup tabs this session owns — don't touch borrowed tabs
-    if (tabLocks.get(tid) === sid) {
+    const lock = tabLocks.get(tid);
+    if (!lock || lock.sessionId !== sid) continue; // skip borrowed
+
+    if (lock.origin === "claimed") {
+      // Pre-existing tabs: release lock + detach, never close
+      await detachTab(tid);
+      cleaned++;
+    } else {
+      // Created tabs: apply cleanup strategy
       if (strategy === "none") {
         // "none" means don't detach or close, but we MUST release the lock
         // since the session is being explicitly destroyed — otherwise ghost locks
@@ -3820,6 +3837,42 @@ async function handleCleanupSession(args) {
   session.tabIds.clear();
   agentSessions.delete(sid);
   return ok(`Session ${sid.substring(0, 8)}\u2026 ended. ${cleaned} owned tab(s) ${strategy === "close" ? "closed" : strategy === "none" ? "released (tabs preserved)" : "detached"}.`);
+}
+
+/**
+ * Reset: terminate ALL sessions and release all tab locks.
+ * Created tabs can optionally be closed; pre-existing (claimed) tabs are NEVER closed.
+ */
+async function handleCleanupReset(args) {
+  const closeTabs = args.closeTabs || false;
+  let closedCount = 0, detachedCount = 0, preservedCount = 0;
+
+  for (const [id, s] of agentSessions) {
+    for (const tid of s.tabIds) {
+      const lock = tabLocks.get(tid);
+      if (!lock || lock.sessionId !== id) continue; // skip borrowed or unowned
+
+      if (lock.origin === "claimed") {
+        // NEVER close pre-existing tabs — release lock + detach only
+        await detachTab(tid);
+        preservedCount++;
+      } else if (lock.origin === "created" && closeTabs) {
+        try { await cleanupTab(tid, "close"); } catch { /* ok */ }
+        closedCount++;
+      } else {
+        await detachTab(tid);
+        detachedCount++;
+      }
+    }
+    s.tabIds.clear();
+  }
+  const sessionCount = agentSessions.size;
+  agentSessions.clear();
+  tabLocks.clear();
+
+  return ok(`Reset complete. ${sessionCount} session(s) cleared.\n` +
+    `Created tabs: ${closeTabs ? closedCount + " closed" : detachedCount + " detached"}\n` +
+    `Pre-existing tabs: ${preservedCount} preserved (never closed)`);
 }
 
 async function handleCleanupStatus() {
@@ -3925,6 +3978,7 @@ const HANDLERS = {
     status: handleCleanupStatus,
     list_sessions: handleCleanupListSessions,
     session: handleCleanupSession,
+    reset: handleCleanupReset,
   },
   browser: {
     profiles: handleBrowserProfiles,
@@ -3969,7 +4023,7 @@ async function handleTool(name, args) {
   // Track tab association with exclusive lock check
   if (args.tabId) {
     const lockOwner = tabLocks.get(args.tabId);
-    if (lockOwner && lockOwner !== sessionId && exclusive !== false) {
+    if (lockOwner?.sessionId && lockOwner.sessionId !== sessionId && exclusive !== false) {
       delete args._agentSession;
       delete args._agentSessionId;
       return fail(`Tab [${args.tabId}] is locked by another agent session. Use exclusive:false to override.`);
@@ -3977,7 +4031,7 @@ async function handleTool(name, args) {
     session.tabIds.add(args.tabId);
     // Only set lock if tab is unowned — never overwrite another session's lock
     if (!lockOwner) {
-      tabLocks.set(args.tabId, sessionId);
+      tabLocks.set(args.tabId, { sessionId, origin: "claimed" });
     }
   }
 
@@ -3993,7 +4047,7 @@ async function handleTool(name, args) {
     const lines = ownedTabs.map((t, i) => {
       const c = activeSessions.has(t.targetId) ? " [connected]" : "";
       const lockOwner = tabLocks.get(t.targetId);
-      const lockTag = lockOwner && lockOwner !== sessionId ? ` [locked by: ${lockOwner.substring(0, 8)}…]` : "";
+      const lockTag = lockOwner?.sessionId && lockOwner.sessionId !== sessionId ? ` [locked by: ${lockOwner.sessionId.substring(0, 8)}…]` : "";
       return `${i + 1}. [${t.targetId}]${c}${lockTag}\n   ${t.title}\n   ${t.url}`;
     });
     delete args._agentSession;
