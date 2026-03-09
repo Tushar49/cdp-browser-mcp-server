@@ -3786,13 +3786,20 @@ async function handleCleanupSession(args) {
   for (const tid of session.tabIds) {
     // Only cleanup tabs this session owns — don't touch borrowed tabs
     if (tabLocks.get(tid) === sid) {
-      try { await cleanupTab(tid, strategy); cleaned++; } catch { /* ok */ }
+      if (strategy === "none") {
+        // "none" means don't detach or close, but we MUST release the lock
+        // since the session is being explicitly destroyed — otherwise ghost locks
+        tabLocks.delete(tid);
+      } else {
+        try { await cleanupTab(tid, strategy); } catch { /* ok */ }
+      }
+      cleaned++;
     }
   }
   // Clear all tab references (including borrowed) and delete session
   session.tabIds.clear();
   agentSessions.delete(sid);
-  return ok(`Session ${sid} ended. ${cleaned} owned tab(s) ${strategy === "close" ? "closed" : "detached"}.`);
+  return ok(`Session ${sid} ended. ${cleaned} owned tab(s) ${strategy === "close" ? "closed" : strategy === "none" ? "released (tabs preserved)" : "detached"}.`);
 }
 
 async function handleCleanupStatus() {
