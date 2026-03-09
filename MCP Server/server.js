@@ -59,10 +59,11 @@ function ensureTempDir() {
   if (!existsSync(TEMP_DIR)) mkdirSync(TEMP_DIR, { recursive: true });
 }
 
-function writeTempFile(name, content, encoding = "utf8") {
+function writeTempFile(name, content, encoding = "utf8", sessionPrefix = null) {
   ensureTempDir();
   autoCleanupTempFiles();
-  const p = join(TEMP_DIR, name);
+  const fileName = sessionPrefix ? `${sessionPrefix.substring(0, 8)}_${name}` : name;
+  const p = join(TEMP_DIR, fileName);
   writeFileSync(p, content, encoding);
   return p;
 }
@@ -1711,7 +1712,7 @@ const TOOLS = [
       "Operations:",
       "- disconnect_tab: Disconnect from a specific tab session without closing the tab (requires: tabId)",
       "- disconnect_all: Disconnect all active tab sessions owned by this session (no parameters)",
-      "- clean_temp: Delete all temporary files (screenshots, PDFs) created by the server (no parameters)",
+      "- clean_temp: Delete temporary files (screenshots, PDFs, response dumps) created by this session. Unprefixed legacy files are also cleaned. (no parameters)",
       "- status: Show current server status — active sessions, temp file count, connection state (no parameters)",
       "- list_sessions: List all active agent sessions with their TTL, idle time, cleanup strategy, and associated tabs (no parameters)",
       "- session: Explicitly end this agent session and clean up its owned tabs (optional: cleanupStrategy)",
@@ -2286,7 +2287,8 @@ async function handlePagePdf(args) {
   const { data } = await cdp("Page.printToPDF", pdfParams, sess, LONG_TIMEOUT);
   const buf = Buffer.from(data, "base64");
   ensureTempDir();
-  const path = join(TEMP_DIR, `page-${Date.now()}.pdf`);
+  const prefix = args._agentSessionId ? `${args._agentSessionId.substring(0, 8)}_` : "";
+  const path = join(TEMP_DIR, `${prefix}page-${Date.now()}.pdf`);
   writeFileSync(path, buf);
   return ok(`PDF saved to: ${path}\nSize: ${(buf.length / 1024).toFixed(1)} KB`);
 }
@@ -3112,7 +3114,7 @@ async function handleObserveRequest(args) {
     if (resp.base64Encoded) {
       const decoded = Buffer.from(resp.body, "base64");
       if (decoded.length > MAX_INLINE_LEN) {
-        const path = writeTempFile(`response-${Date.now()}.bin`, decoded, null);
+        const path = writeTempFile(`response-${Date.now()}.bin`, decoded, null, args._agentSessionId);
         result.responseBody = `[Binary, ${decoded.length} bytes, saved to: ${path}]`;
       } else {
         result.responseBody = decoded.toString("utf8");
