@@ -1818,6 +1818,11 @@ async function handleTabsNew(args) {
 
 async function handleTabsClose(args) {
   if (!args.tabId) return fail("Provide 'tabId' to close.");
+  // Guard: only allow closing tabs this session owns or unowned tabs
+  const lockOwner = tabLocks.get(args.tabId);
+  if (lockOwner && lockOwner !== args._agentSessionId) {
+    return fail(`Tab [${args.tabId}] is locked by another session. Cannot close.`);
+  }
   await detachTab(args.tabId);
   await cdp("Target.closeTarget", { targetId: args.tabId });
   return ok("Tab closed.");
