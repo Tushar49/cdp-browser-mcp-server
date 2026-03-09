@@ -3731,9 +3731,18 @@ async function handleCleanupDisconnectAll(args) {
   return ok(`Disconnected from ${count} tab(s).${skipped ? ` ${skipped} locked tab(s) skipped.` : ""}`);
 }
 
-async function handleCleanupCleanTemp() {
-  const n = cleanupTempFiles();
-  return ok(`Cleaned up ${n} temp file(s) from ${TEMP_DIR}`);
+async function handleCleanupCleanTemp(args) {
+  if (!existsSync(TEMP_DIR)) return ok("No temp directory.");
+  const prefix = args._agentSessionId ? args._agentSessionId.substring(0, 8) + "_" : null;
+  const files = readdirSync(TEMP_DIR);
+  let count = 0;
+  for (const f of files) {
+    // Only delete files belonging to this session, or unprefixed legacy files
+    if (!prefix || f.startsWith(prefix) || !f.match(/^[a-f0-9]{8}_/)) {
+      try { unlinkSync(join(TEMP_DIR, f)); count++; } catch { /* ok */ }
+    }
+  }
+  return ok(`Cleaned up ${count} temp file(s) from ${TEMP_DIR}`);
 }
 
 async function handleCleanupListSessions() {
@@ -3754,7 +3763,7 @@ async function handleCleanupListSessions() {
     const ttl = Math.max(0, ((SESSION_TTL - (now - s.lastActivity)) / 1000)).toFixed(0);
     const ownedTabs = [...s.tabIds].filter(tid => tabLocks.get(tid) === id);
     const borrowedTabs = [...s.tabIds].filter(tid => tabLocks.get(tid) !== id);
-    let section = `Session: ${id}\n  Last activity: ${age}s ago | TTL remaining: ${ttl}s\n  Cleanup strategy: ${s.cleanupStrategy || "close"}\n  Owned tabs: ${ownedTabs.length}`;
+    let section = `Session: ${id.substring(0, 8)}\u2026\n  Last activity: ${age}s ago | TTL remaining: ${ttl}s\n  Cleanup strategy: ${s.cleanupStrategy || "close"}\n  Owned tabs: ${ownedTabs.length}`;
     if (ownedTabs.length) {
       for (const tid of ownedTabs) {
         const tab = tabMap.get(tid);
@@ -3788,7 +3797,7 @@ async function handleCleanupSession(args) {
   // to prevent cross-session termination in multi-subagent workflows
   const sid = args._agentSessionId;
   const session = agentSessions.get(sid);
-  if (!session) return fail(`No session found: ${sid}`);
+  if (!session) return fail(`No session found.`);
 
   const strategy = args.cleanupStrategy || session.cleanupStrategy || "close";
   let cleaned = 0;
@@ -3808,7 +3817,7 @@ async function handleCleanupSession(args) {
   // Clear all tab references (including borrowed) and delete session
   session.tabIds.clear();
   agentSessions.delete(sid);
-  return ok(`Session ${sid} ended. ${cleaned} owned tab(s) ${strategy === "close" ? "closed" : strategy === "none" ? "released (tabs preserved)" : "detached"}.`);
+  return ok(`Session ${sid.substring(0, 8)}\u2026 ended. ${cleaned} owned tab(s) ${strategy === "close" ? "closed" : strategy === "none" ? "released (tabs preserved)" : "detached"}.`);
 }
 
 async function handleCleanupStatus() {
@@ -3987,7 +3996,7 @@ async function handleTool(name, args) {
     });
     delete args._agentSession;
     delete args._agentSessionId;
-    return ok(`[session: ${sessionId}] ${ownedTabs.length} tab(s):\n\n${lines.join("\n\n")}`);
+    return ok(`[session: ${sessionId.substring(0, 8)}…] ${ownedTabs.length} tab(s):\n\n${lines.join("\n\n")}`);
   }
 
   // ── Modal state guard ──
