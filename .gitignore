@@ -10,6 +10,11 @@ tmp/
 # Prompts / planning docs
 .prompts/
 
+# Audit/summary files (never commit)
+PHASE_*
+*_AUDIT*
+*_SUMMARY*
+
 # OS files
 Thumbs.db
 .DS_Store

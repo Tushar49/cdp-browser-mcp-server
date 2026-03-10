@@ -1,31 +1,38 @@
 #!/usr/bin/env node
 
 /**
- * CDP Browser Automation — MCP Server  v4.2
+ * CDP Browser Automation — MCP Server  v4.9
  *
- * 9 consolidated tools with ~50 sub-actions for full browser automation.
- * v4 upgrades: stable element refs (backendNodeId), auto-waiting, incremental snapshots,
- * per-agent session isolation, framework-aware inputs, modal guards, rich tool descriptions,
+ * 11 tools with 84+ sub-actions for full browser automation.
+ * Features: stable element refs (backendNodeId), auto-waiting, incremental snapshots,
+ * per-agent session isolation with tab locking, framework-aware inputs, modal guards,
+ * human-like interaction mode, Chrome instance/profile management, JavaScript debugger
+ * with breakpoints/stepping/call-stack inspection, resource overrides, DOM/event breakpoints,
  * auto-console-error reporting, connection health monitoring, download tracking.
  *
  * Tools:
  *   tabs      — Tab lifecycle (list, find, new, close, activate, info)
- *   page      — Navigation, snapshot, screenshot, content, wait, PDF, dialog, inject, CSP bypass
- *   interact  — Click, hover, type, fill, select, press, drag, scroll, upload, focus, check
+ *   page      — Navigation, snapshot, screenshot, content, set_content, add_style, wait, PDF, dialog, inject
+ *   interact  — Click, hover, type, fill, select, press, drag, scroll, upload, focus, check, tap
  *   execute   — JS eval, script, call-on-element
  *   observe   — Console, network, request body, performance metrics, downloads
  *   emulate   — Viewport, color, UA, geo, CPU, timezone, locale, vision, network, SSL, etc.
  *   storage   — Cookies, localStorage, indexedDB, cache, quota
  *   intercept — HTTP request interception, mocking, blocking via Fetch domain
- *   cleanup   — Disconnect sessions, clean temp files, status, list_sessions
+ *   cleanup   — Disconnect sessions, clean temp files, status, list_sessions, session, reset
+ *   browser   — Chrome instance discovery, profile listing, connection switching
+ *   debug     — JS debugger (breakpoints, stepping, call stack), resource overrides, DOM/event breakpoints
  *
  * Setup:  chrome://flags/#enable-remote-debugging → Enabled → Relaunch
  *
  * Env vars:
- *   CDP_PORT          Chrome debugging port        (default: 9222)
- *   CDP_HOST          Chrome debugging host        (default: 127.0.0.1)
- *   CDP_TIMEOUT       Command timeout in ms        (default: 30000)
- *   CDP_SESSION_TTL   Agent session TTL in ms      (default: 300000)
+ *   CDP_PORT              Chrome debugging port             (default: 9222)
+ *   CDP_HOST              Chrome debugging host             (default: 127.0.0.1)
+ *   CDP_TIMEOUT           Command timeout in ms             (default: 30000)
+ *   CDP_SESSION_TTL       Agent session TTL in ms           (default: 300000)
+ *   CDP_USER_DATA         Chrome User Data directory path
+ *   CDP_PROFILE           Auto-connect to Chrome instance by name or path
+ *   CDP_DEBUGGER_TIMEOUT  Debugger auto-resume timeout ms   (default: 30000)
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
