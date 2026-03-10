@@ -7,9 +7,9 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-4.8.1-blue" alt="Version">
-  <img src="https://img.shields.io/badge/tools-10-green" alt="Tools">
-  <img src="https://img.shields.io/badge/sub--actions-63+-green" alt="Actions">
+  <img src="https://img.shields.io/badge/version-4.9.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/tools-11-green" alt="Tools">
+  <img src="https://img.shields.io/badge/sub--actions-84+-green" alt="Actions">
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen" alt="Node">
   <img src="https://img.shields.io/badge/license-MIT-yellow" alt="License">
 </p>
@@ -323,6 +323,32 @@ Set any combination of properties in a single call:
 | `profiles` | List all Chrome instances with profiles | — | — |
 | `connect` | Switch to a different Chrome instance | `instance` | — |
 | `active` | Show current connection info | — | — |
+
+### `debug` — JavaScript Debugger & Resource Overrides
+
+| Action | Description | Required | Optional |
+|--------|-------------|----------|----------|
+| `enable` | Enable JS debugger, start tracking scripts | `tabId` | — |
+| `disable` | Disable debugger, clear breakpoints | `tabId` | — |
+| `set_breakpoint` | Set breakpoint by URL + line | `tabId`, `url`, `lineNumber` | `columnNumber`, `condition` |
+| `remove_breakpoint` | Remove a breakpoint | `tabId`, `breakpointId` | — |
+| `list_breakpoints` | List active breakpoints | `tabId` | — |
+| `pause` | Pause execution immediately | `tabId` | — |
+| `resume` | Resume paused execution | `tabId` | — |
+| `step_over` | Step over current statement | `tabId` | — |
+| `step_into` | Step into function call | `tabId` | — |
+| `step_out` | Step out of current function | `tabId` | — |
+| `call_stack` | View call stack when paused | `tabId` | — |
+| `evaluate_on_frame` | Evaluate expression in call frame | `tabId`, `expression` | `frameIndex` |
+| `list_scripts` | List all loaded scripts | `tabId` | — |
+| `get_source` | Get script source code | `tabId`, `scriptId` | — |
+| `override_resource` | Register URL pattern → response body | `tabId`, `urlPattern` | `body`, `responseCode`, `headers` |
+| `remove_override` | Remove a resource override | `tabId`, `urlPattern` | — |
+| `list_overrides` | List active overrides | `tabId` | — |
+| `set_dom_breakpoint` | Break on DOM node change | `tabId`, `uid`, `type` | — |
+| `remove_dom_breakpoint` | Remove DOM breakpoint | `tabId`, `uid`, `type` | — |
+| `set_event_breakpoint` | Break on event type | `tabId`, `eventName` | — |
+| `remove_event_breakpoint` | Remove event breakpoint | `tabId`, `eventName` | — |
 
 ---
 

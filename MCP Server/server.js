@@ -48,6 +48,7 @@ const CDP_TIMEOUT = parseInt(process.env.CDP_TIMEOUT || "30000");
 const SESSION_TTL = parseInt(process.env.CDP_SESSION_TTL) || 300000;
 const LONG_TIMEOUT = 120_000;
 const MAX_INLINE_LEN = 60_000;
+const CDP_DEBUGGER_TIMEOUT = parseInt(process.env.CDP_DEBUGGER_TIMEOUT || "30000");
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const REPO_ROOT = dirname(__dirname); // up from MCP Server/ to repo root
@@ -126,6 +127,11 @@ const tabLocks = new Map();             // tabId → { sessionId, origin: "creat
 const processSessionId = randomUUID();  // auto-assigned per-process session ID
 
 const downloads = new Map();              // sessionId → [{guid, url, suggestedFilename, state, receivedBytes, totalBytes}]
+const pausedTabs = new Map();             // cdpSessionId → { reason, callFrames, hitBreakpoints, ts }
+const parsedScripts = new Map();          // cdpSessionId → Map<scriptId, { url, startLine, endLine, hash }>
+const activeBreakpoints = new Map();      // cdpSessionId → Map<breakpointId, { url, lineNumber, columnNumber, condition }>
+const resourceOverrides = new Map();      // cdpSessionId → [{ urlPattern, responseCode, headers, body }]
+const fetchPatterns = new Map();          // cdpSessionId → { request: [...], response: [...] }
 
 const NO_ENABLE = new Set(["Input", "Target", "Browser", "Accessibility", "DOM", "Emulation", "Storage"]);
 
@@ -279,6 +285,11 @@ function connectBrowser() {
       refMaps.clear();
       lastSnapshots.clear();
       downloads.clear();
+      pausedTabs.clear();
+      parsedScripts.clear();
+      activeBreakpoints.clear();
+      resourceOverrides.clear();
+      fetchPatterns.clear();
       browserWs = null;
       activeConnectionInfo = null;
       overrideUserDataDir = null;
@@ -437,6 +448,34 @@ function handleEvent(sessionId, method, params) {
 
   // ── Fetch interception (v3) ──
   if (method === "Fetch.requestPaused") {
+    // Response-stage pause (has responseStatusCode) — check resource overrides
+    if (params.responseStatusCode !== undefined) {
+      const overrides = resourceOverrides.get(sessionId) || [];
+      const url = params.request?.url || "";
+      const override = overrides.find(o => {
+        try { return new RegExp(o.urlPattern, "i").test(url); } catch { return false; }
+      });
+      if (override) {
+        (async () => {
+          try {
+            await cdp("Fetch.fulfillRequest", {
+              requestId: params.requestId,
+              responseCode: override.responseCode || 200,
+              responseHeaders: override.headers || [{ name: "Content-Type", value: "text/html" }],
+              ...(override.body ? { body: Buffer.from(override.body).toString("base64") } : {}),
+            }, sessionId);
+          } catch { /* ok */ }
+        })();
+      } else {
+        // No matching override — MUST continue or Chrome hangs
+        (async () => {
+          try { await cdp("Fetch.continueResponse", { requestId: params.requestId }, sessionId); } catch { /* ok */ }
+        })();
+      }
+      return;
+    }
+
+    // Request-stage pause — existing fetchRules logic
     const pending = pendingFetchRequests.get(sessionId) || new Map();
     const info = {
       requestId: params.requestId,
@@ -487,6 +526,42 @@ function handleEvent(sessionId, method, params) {
         pending.delete(params.requestId);
       }
     }, 10000);
+  }
+
+  // ── Debugger events ──
+  if (method === "Debugger.scriptParsed") {
+    const scripts = parsedScripts.get(sessionId) || new Map();
+    if (params.url) {
+      scripts.set(params.scriptId, {
+        url: params.url,
+        startLine: params.startLine,
+        endLine: params.endLine,
+        hash: params.hash || "",
+      });
+      parsedScripts.set(sessionId, scripts);
+    }
+  }
+
+  if (method === "Debugger.paused") {
+    const pauseTs = Date.now();
+    pausedTabs.set(sessionId, {
+      reason: params.reason,
+      callFrames: params.callFrames,
+      hitBreakpoints: params.hitBreakpoints || [],
+      ts: pauseTs,
+    });
+    // Auto-resume after timeout to prevent permanently bricked tabs
+    setTimeout(async () => {
+      const entry = pausedTabs.get(sessionId);
+      if (entry && entry.ts === pauseTs) {
+        try { await cdp("Debugger.resume", {}, sessionId); } catch { /* ok */ }
+        pausedTabs.delete(sessionId);
+      }
+    }, CDP_DEBUGGER_TIMEOUT);
+  }
+
+  if (method === "Debugger.resumed") {
+    pausedTabs.delete(sessionId);
   }
 }
 
@@ -598,6 +673,11 @@ async function detachTab(tabId) {
   refMaps.delete(sid);
   lastSnapshots.delete(sid);
   downloads.delete(sid);
+  pausedTabs.delete(sid);
+  parsedScripts.delete(sid);
+  activeBreakpoints.delete(sid);
+  resourceOverrides.delete(sid);
+  fetchPatterns.delete(sid);
 }
 
 // ─── Tab Listing ────────────────────────────────────────────────────
@@ -1779,6 +1859,96 @@ const TOOLS = [
         instance: { type: "string", description: "Chrome instance to connect to — name (e.g. 'Chrome Canary'), port number, or User Data directory path." },
       },
       required: ["action"],
+    },
+  },
+
+  // ── 11. debug ──
+  {
+    name: "debug",
+    description: [
+      "JavaScript debugger, resource overrides, and DOM/event breakpoints. Uses CDP Debugger and DOMDebugger domains.",
+      "",
+      "Debugger operations:",
+      "- enable: Enable JavaScript debugger for a tab — starts tracking scripts and allows breakpoints (requires: tabId)",
+      "- disable: Disable the debugger for a tab (requires: tabId)",
+      "- set_breakpoint: Set a breakpoint by URL pattern + line number (requires: tabId, url, lineNumber; optional: columnNumber, condition)",
+      "- remove_breakpoint: Remove a breakpoint by ID (requires: tabId, breakpointId)",
+      "- list_breakpoints: List all active breakpoints for a tab (requires: tabId)",
+      "- pause: Pause JavaScript execution immediately (requires: tabId)",
+      "- resume: Resume execution after a pause (requires: tabId)",
+      "- step_over: Step over the current statement (requires: tabId)",
+      "- step_into: Step into the next function call (requires: tabId)",
+      "- step_out: Step out of the current function (requires: tabId)",
+      "- call_stack: Get the current call stack with scope variables when paused (requires: tabId)",
+      "- evaluate_on_frame: Evaluate an expression in a specific call frame (requires: tabId, expression; optional: frameIndex — default 0, top frame)",
+      "- list_scripts: List all loaded scripts tracked by the debugger (requires: tabId)",
+      "- get_source: Get the source code of a script by ID (requires: tabId, scriptId)",
+      "",
+      "Resource override operations:",
+      "- override_resource: Pre-register a URL pattern + replacement response body. Pattern is a JS regex matched against response URLs. Matching responses are fulfilled automatically — no LLM round-trip (requires: tabId, urlPattern; optional: body, responseCode, headers)",
+      "- remove_override: Remove a resource override by URL pattern (requires: tabId, urlPattern)",
+      "- list_overrides: List all active resource overrides (requires: tabId)",
+      "",
+      "DOM/Event breakpoint operations:",
+      "- set_dom_breakpoint: Break when a DOM node is modified (requires: tabId, uid, type — 'subtree-modified', 'attribute-modified', or 'node-removed')",
+      "- remove_dom_breakpoint: Remove a DOM breakpoint (requires: tabId, uid, type)",
+      "- set_event_breakpoint: Break on a specific event type like 'click', 'xhr', 'setTimeout' (requires: tabId, eventName)",
+      "- remove_event_breakpoint: Remove an event breakpoint (requires: tabId, eventName)",
+      "",
+      "Notes:",
+      "- Call 'enable' before setting breakpoints or listing scripts",
+      "- When debugger pauses, ALL other tool calls on that tab are blocked until you resume/step",
+      "- Auto-resume fires after 30s (CDP_DEBUGGER_TIMEOUT) to prevent permanently frozen tabs",
+      "- Resource overrides work independently of the debugger — no need to call 'enable' first",
+      "- Resource overrides coexist with request interception (intercept tool). Both can be active simultaneously",
+      "- Performance: while overrides are active, ALL responses are routed through the handler for regex matching. Remove overrides when done to avoid unnecessary overhead on resource-heavy pages",
+      "",
+      "Session params (all tools): sessionId, cleanupStrategy, exclusive",
+    ].join("\n"),
+    annotations: {
+      title: "Debug & Override",
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: [
+            "enable", "disable",
+            "set_breakpoint", "remove_breakpoint", "list_breakpoints",
+            "pause", "resume", "step_over", "step_into", "step_out",
+            "call_stack", "evaluate_on_frame",
+            "list_scripts", "get_source",
+            "override_resource", "remove_override", "list_overrides",
+            "set_dom_breakpoint", "remove_dom_breakpoint",
+            "set_event_breakpoint", "remove_event_breakpoint",
+          ],
+          description: "Debug action.",
+        },
+        tabId: { type: "string", description: "Tab ID." },
+        url: { type: "string", description: "URL pattern for set_breakpoint (matched by prefix)." },
+        lineNumber: { type: "number", description: "Line number for set_breakpoint (0-based)." },
+        columnNumber: { type: "number", description: "Column number for set_breakpoint (0-based, optional)." },
+        condition: { type: "string", description: "Conditional breakpoint expression — break only when this evaluates to true." },
+        breakpointId: { type: "string", description: "Breakpoint ID for remove_breakpoint." },
+        expression: { type: "string", description: "JS expression for evaluate_on_frame." },
+        frameIndex: { type: "number", description: "Call frame index for evaluate_on_frame (default: 0 = top frame)." },
+        scriptId: { type: "string", description: "Script ID for get_source." },
+        urlPattern: { type: "string", description: "URL regex pattern for override_resource / remove_override (JS regex syntax, e.g. 'example\\\\.com/api/.*')." },
+        body: { type: "string", description: "Response body for override_resource." },
+        responseCode: { type: "number", description: "HTTP status code for override_resource (default: 200)." },
+        headers: { type: "object", description: "Response headers for override_resource (object of name→value)." },
+        uid: { type: "number", description: "Element ref for set_dom_breakpoint / remove_dom_breakpoint." },
+        type: { type: "string", enum: ["subtree-modified", "attribute-modified", "node-removed"], description: "DOM breakpoint type." },
+        eventName: { type: "string", description: "Event name for set_event_breakpoint (e.g. 'click', 'xhr', 'setTimeout')." },
+        sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation." },
+        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry." },
+        exclusive: { type: "boolean", description: "Lock tab to this session (default: true)." },
+      },
+      required: ["action", "tabId"],
     },
   },
 ];
@@ -3518,10 +3688,17 @@ async function handleInterceptEnable(args) {
 
 async function handleInterceptDisable(args) {
   const sess = await getTabSession(args.tabId);
-  await cdp("Fetch.disable", {}, sess);
+
+  // Only clear request-stage patterns — response-stage overrides may still be active
+  const p = fetchPatterns.get(sess);
+  if (p) p.request = [];
+  await refreshFetchPatterns(sess);
+
   pendingFetchRequests.delete(sess);
   fetchRules.delete(sess);
-  return ok("Request interception disabled.");
+
+  const overrideCount = resourceOverrides.get(sess)?.length || 0;
+  return ok("Request interception disabled." + (overrideCount ? ` ${overrideCount} response override(s) still active.` : ""));
 }
 
 async function handleInterceptContinue(args) {
@@ -3595,6 +3772,251 @@ async function handleInterceptList(args) {
     return `[${r.requestId}] ${r.method} ${r.url.substring(0, 100)} (${r.resourceType}, ${age}s ago)`;
   });
   return ok(`${pending.size} pending request(s):\n\n${lines.join("\n")}`);
+}
+
+// ─── Debug Handlers ─────────────────────────────────────────────────
+
+async function handleDebugEnable(args) {
+  const sess = await getTabSession(args.tabId);
+  await ensureDomain(sess, "Debugger");
+  return ok("Debugger enabled. Scripts are being tracked. Set breakpoints with set_breakpoint.");
+}
+
+async function handleDebugDisable(args) {
+  const sess = await getTabSession(args.tabId);
+  try { await cdp("Debugger.disable", {}, sess); } catch { /* ok */ }
+  pausedTabs.delete(sess);
+  parsedScripts.delete(sess);
+  activeBreakpoints.delete(sess);
+  return ok("Debugger disabled.");
+}
+
+async function handleDebugSetBreakpoint(args) {
+  if (args.url === undefined || args.lineNumber === undefined) return fail("Provide 'url' and 'lineNumber'.");
+  const sess = await getTabSession(args.tabId);
+  await ensureDomain(sess, "Debugger");
+  const params = { url: args.url, lineNumber: args.lineNumber };
+  if (args.columnNumber !== undefined) params.columnNumber = args.columnNumber;
+  if (args.condition) params.condition = args.condition;
+  const result = await cdp("Debugger.setBreakpointByUrl", params, sess);
+  const bps = activeBreakpoints.get(sess) || new Map();
+  bps.set(result.breakpointId, { url: args.url, lineNumber: args.lineNumber, columnNumber: args.columnNumber, condition: args.condition });
+  activeBreakpoints.set(sess, bps);
+  const locs = (result.locations || []).map(l => `  ${l.scriptId}:${l.lineNumber}:${l.columnNumber || 0}`).join("\n");
+  return ok(`Breakpoint set: ${result.breakpointId}\nResolved locations:\n${locs || "  (none yet — will resolve when matching script loads)"}`);
+}
+
+async function handleDebugRemoveBreakpoint(args) {
+  if (!args.breakpointId) return fail("Provide 'breakpointId'.");
+  const sess = await getTabSession(args.tabId);
+  await cdp("Debugger.removeBreakpoint", { breakpointId: args.breakpointId }, sess);
+  const bps = activeBreakpoints.get(sess);
+  if (bps) bps.delete(args.breakpointId);
+  return ok(`Breakpoint removed: ${args.breakpointId}`);
+}
+
+async function handleDebugListBreakpoints(args) {
+  const sess = await getTabSession(args.tabId);
+  const bps = activeBreakpoints.get(sess) || new Map();
+  if (bps.size === 0) return ok("No active breakpoints.");
+  const lines = [...bps.entries()].map(([id, bp]) => {
+    const cond = bp.condition ? ` [if: ${bp.condition}]` : "";
+    return `[${id}] ${bp.url}:${bp.lineNumber}${bp.columnNumber !== undefined ? `:${bp.columnNumber}` : ""}${cond}`;
+  });
+  return ok(`${bps.size} breakpoint(s):\n\n${lines.join("\n")}`);
+}
+
+async function handleDebugPause(args) {
+  const sess = await getTabSession(args.tabId);
+  await cdp("Debugger.pause", {}, sess);
+  return ok("Pause requested. Execution will halt at the next statement.");
+}
+
+async function handleDebugResume(args) {
+  const sess = await getTabSession(args.tabId);
+  await cdp("Debugger.resume", {}, sess);
+  pausedTabs.delete(sess);
+  return ok("Resumed execution.");
+}
+
+async function handleDebugStepOver(args) {
+  const sess = await getTabSession(args.tabId);
+  await cdp("Debugger.stepOver", {}, sess);
+  return ok("Stepped over. Waiting for next pause...");
+}
+
+async function handleDebugStepInto(args) {
+  const sess = await getTabSession(args.tabId);
+  await cdp("Debugger.stepInto", {}, sess);
+  return ok("Stepped into. Waiting for next pause...");
+}
+
+async function handleDebugStepOut(args) {
+  const sess = await getTabSession(args.tabId);
+  await cdp("Debugger.stepOut", {}, sess);
+  return ok("Stepped out. Waiting for next pause...");
+}
+
+async function handleDebugCallStack(args) {
+  const sess = await getTabSession(args.tabId);
+  const paused = pausedTabs.get(sess);
+  if (!paused) return fail("Debugger is not paused. Use 'pause' or set a breakpoint first.");
+  const frames = paused.callFrames || [];
+  if (!frames.length) return ok("Paused but no call frames available.");
+  const sections = frames.slice(0, 10).map((f, i) => {
+    let section = `#${i} ${f.functionName || "(anonymous)"}\n  ${f.url}:${f.location.lineNumber}:${f.location.columnNumber || 0}`;
+    if (i < 3 && f.scopeChain) {
+      const localScope = f.scopeChain.find(s => s.type === "local");
+      if (localScope && localScope.object?.objectId) {
+        section += "\n  Local vars: (use evaluate_on_frame to inspect)";
+      }
+    }
+    return section;
+  });
+  const hitBps = paused.hitBreakpoints?.length ? `\nHit breakpoints: ${paused.hitBreakpoints.join(", ")}` : "";
+  return ok(`Paused: ${paused.reason}${hitBps}\n\nCall stack (${frames.length} frames):\n\n${sections.join("\n\n")}`);
+}
+
+async function handleDebugEvaluateOnFrame(args) {
+  if (!args.expression) return fail("Provide 'expression'.");
+  const sess = await getTabSession(args.tabId);
+  const paused = pausedTabs.get(sess);
+  if (!paused) return fail("Debugger is not paused.");
+  const frameIndex = args.frameIndex || 0;
+  const frame = paused.callFrames?.[frameIndex];
+  if (!frame) return fail(`Frame index ${frameIndex} out of range (${paused.callFrames?.length || 0} frames).`);
+  const result = await cdp("Debugger.evaluateOnCallFrame", {
+    callFrameId: frame.callFrameId,
+    expression: args.expression,
+    returnByValue: true,
+  }, sess);
+  if (result.exceptionDetails) {
+    return fail(`Evaluation error: ${result.exceptionDetails.exception?.description || result.exceptionDetails.text}`);
+  }
+  const val = result.result;
+  let display;
+  if (val.type === "object" && val.value !== undefined) {
+    display = JSON.stringify(val.value, null, 2);
+  } else if (val.type === "undefined") {
+    display = "undefined";
+  } else {
+    display = val.description || val.value?.toString() || val.type;
+  }
+  return ok(`[frame #${frameIndex}] ${args.expression} = ${display}`);
+}
+
+async function handleDebugListScripts(args) {
+  const sess = await getTabSession(args.tabId);
+  const scripts = parsedScripts.get(sess) || new Map();
+  if (scripts.size === 0) return ok("No scripts tracked. Call 'enable' first, then reload the page.");
+  const entries = [...scripts.entries()].filter(([, s]) => s.url);
+  const lines = entries.slice(0, 50).map(([id, s]) => `[${id}] ${s.url} (lines ${s.startLine}-${s.endLine})`);
+  return ok(`${entries.length} script(s)${entries.length > 50 ? " (showing first 50)" : ""}:\n\n${lines.join("\n")}`);
+}
+
+async function handleDebugGetSource(args) {
+  if (!args.scriptId) return fail("Provide 'scriptId'.");
+  const sess = await getTabSession(args.tabId);
+  const result = await cdp("Debugger.getScriptSource", { scriptId: args.scriptId }, sess);
+  const source = result.scriptSource || "";
+  return ok(`Script ${args.scriptId} (${source.length} chars):\n\n${source}`);
+}
+
+// ── Resource Override Handlers ──
+
+async function handleDebugOverrideResource(args) {
+  if (!args.urlPattern) return fail("Provide 'urlPattern' (regex pattern to match response URLs).");
+  const sess = await getTabSession(args.tabId);
+  try { new RegExp(args.urlPattern, "i"); } catch (e) { return fail(`Invalid regex: ${e.message}`); }
+  const override = {
+    urlPattern: args.urlPattern,
+    responseCode: args.responseCode || 200,
+    headers: args.headers
+      ? Object.entries(args.headers).map(([name, value]) => ({ name, value: String(value) }))
+      : [{ name: "Content-Type", value: "text/html" }],
+    body: args.body || "",
+  };
+  const overrides = resourceOverrides.get(sess) || [];
+  const idx = overrides.findIndex(o => o.urlPattern === args.urlPattern);
+  if (idx >= 0) overrides[idx] = override;
+  else overrides.push(override);
+  resourceOverrides.set(sess, overrides);
+  const p = fetchPatterns.get(sess) || { request: [], response: [] };
+  if (!p.response.includes(args.urlPattern)) {
+    p.response.push(args.urlPattern);
+    fetchPatterns.set(sess, p);
+  }
+  await refreshFetchPatterns(sess);
+  return ok(`Resource override registered.\nPattern: ${args.urlPattern}\nStatus: ${override.responseCode}\nBody: ${override.body.length} chars\nMatching responses will be replaced automatically.`);
+}
+
+async function handleDebugRemoveOverride(args) {
+  if (!args.urlPattern) return fail("Provide 'urlPattern'.");
+  const sess = await getTabSession(args.tabId);
+  const overrides = resourceOverrides.get(sess) || [];
+  const idx = overrides.findIndex(o => o.urlPattern === args.urlPattern);
+  if (idx < 0) return fail(`No override found for pattern: ${args.urlPattern}`);
+  overrides.splice(idx, 1);
+  const p = fetchPatterns.get(sess);
+  if (p) {
+    p.response = p.response.filter(pat => pat !== args.urlPattern);
+    await refreshFetchPatterns(sess);
+  }
+  return ok(`Override removed: ${args.urlPattern}\n${overrides.length} override(s) remaining.`);
+}
+
+async function handleDebugListOverrides(args) {
+  const sess = await getTabSession(args.tabId);
+  const overrides = resourceOverrides.get(sess) || [];
+  if (overrides.length === 0) return ok("No active resource overrides.");
+  const lines = overrides.map((o, i) => `${i + 1}. ${o.urlPattern} → ${o.responseCode} (${o.body.length} chars)`);
+  return ok(`${overrides.length} override(s):\n\n${lines.join("\n")}`);
+}
+
+// ── DOM/Event Breakpoint Handlers ──
+
+async function handleDebugSetDomBreakpoint(args) {
+  if (args.uid === undefined) return fail("Provide 'uid' (element ref from snapshot).");
+  if (!args.type) return fail("Provide 'type': 'subtree-modified', 'attribute-modified', or 'node-removed'.");
+  const sess = await getTabSession(args.tabId);
+  const map = refMaps.get(sess);
+  const backendNodeId = map?.get(args.uid);
+  if (!backendNodeId) return fail(`Element ref=${args.uid} not found. Take a fresh snapshot.`);
+  await cdp("DOM.getDocument", { depth: 0 }, sess);
+  const { nodeIds } = await cdp("DOM.pushNodesByBackendIds", { backendNodeIds: [backendNodeId] }, sess);
+  const nodeId = nodeIds?.[0];
+  if (!nodeId) return fail(`Cannot resolve DOM nodeId for ref=${args.uid}. The element may have been removed.`);
+  await cdp("DOMDebugger.setDOMBreakpoint", { nodeId, type: args.type }, sess);
+  return ok(`DOM breakpoint set: ${args.type} on ref=${args.uid} (nodeId=${nodeId})\nExecution will pause when this node is ${args.type === "subtree-modified" ? "or its children are modified" : args.type === "attribute-modified" ? "has attributes changed" : "removed from DOM"}.`);
+}
+
+async function handleDebugRemoveDomBreakpoint(args) {
+  if (args.uid === undefined) return fail("Provide 'uid'.");
+  if (!args.type) return fail("Provide 'type'.");
+  const sess = await getTabSession(args.tabId);
+  const map = refMaps.get(sess);
+  const backendNodeId = map?.get(args.uid);
+  if (!backendNodeId) return fail(`Element ref=${args.uid} not found. Take a fresh snapshot.`);
+  await cdp("DOM.getDocument", { depth: 0 }, sess);
+  const { nodeIds } = await cdp("DOM.pushNodesByBackendIds", { backendNodeIds: [backendNodeId] }, sess);
+  const nodeId = nodeIds?.[0];
+  if (!nodeId) return fail(`Cannot resolve DOM nodeId for ref=${args.uid}.`);
+  await cdp("DOMDebugger.removeDOMBreakpoint", { nodeId, type: args.type }, sess);
+  return ok(`DOM breakpoint removed: ${args.type} on ref=${args.uid}`);
+}
+
+async function handleDebugSetEventBreakpoint(args) {
+  if (!args.eventName) return fail("Provide 'eventName' (e.g. 'click', 'xhr', 'setTimeout').");
+  const sess = await getTabSession(args.tabId);
+  await cdp("DOMDebugger.setEventListenerBreakpoint", { eventName: args.eventName }, sess);
+  return ok(`Event breakpoint set: ${args.eventName}\nExecution will pause when a '${args.eventName}' event fires.`);
+}
+
+async function handleDebugRemoveEventBreakpoint(args) {
+  if (!args.eventName) return fail("Provide 'eventName'.");
+  const sess = await getTabSession(args.tabId);
+  await cdp("DOMDebugger.removeEventListenerBreakpoint", { eventName: args.eventName }, sess);
+  return ok(`Event breakpoint removed: ${args.eventName}`);
 }
 
 // ─── Browser Handlers ───────────────────────────────────────────────
@@ -3988,6 +4410,29 @@ const HANDLERS = {
     connect: handleBrowserConnect,
     active: handleBrowserActive,
   },
+  debug: {
+    enable: handleDebugEnable,
+    disable: handleDebugDisable,
+    set_breakpoint: handleDebugSetBreakpoint,
+    remove_breakpoint: handleDebugRemoveBreakpoint,
+    list_breakpoints: handleDebugListBreakpoints,
+    pause: handleDebugPause,
+    resume: handleDebugResume,
+    step_over: handleDebugStepOver,
+    step_into: handleDebugStepInto,
+    step_out: handleDebugStepOut,
+    call_stack: handleDebugCallStack,
+    evaluate_on_frame: handleDebugEvaluateOnFrame,
+    list_scripts: handleDebugListScripts,
+    get_source: handleDebugGetSource,
+    override_resource: handleDebugOverrideResource,
+    remove_override: handleDebugRemoveOverride,
+    list_overrides: handleDebugListOverrides,
+    set_dom_breakpoint: handleDebugSetDomBreakpoint,
+    remove_dom_breakpoint: handleDebugRemoveDomBreakpoint,
+    set_event_breakpoint: handleDebugSetEventBreakpoint,
+    remove_event_breakpoint: handleDebugRemoveEventBreakpoint,
+  },
 };
 
 async function handleTool(name, args) {
@@ -4072,6 +4517,29 @@ async function handleTool(name, args) {
           `A JavaScript dialog is blocking the page. Handle it first.\n` +
           `Dialog: ${d.type} "${d.message.substring(0, 100)}"\n` +
           `→ Use page tool with action: 'dialog', tabId: '${args.tabId}', accept: true/false`
+        );
+      }
+    }
+  }
+
+  // ── Debugger pause guard ──
+  // If debugger is paused on the target tab, block non-debug tool calls
+  // Allow ALL debug actions (read-only inspection + override management are debugger-independent)
+  // Also allow page.dialog since dialogs can fire while paused and must be dismissible
+  if (args.tabId) {
+    const sid = activeSessions.get(args.tabId);
+    if (sid) {
+      const paused = pausedTabs.get(sid);
+      if (paused && name !== "debug" && !(name === "page" && args.action === "dialog")) {
+        const topFrame = paused.callFrames?.[0];
+        const location = topFrame ? `\nPaused at: ${topFrame.url}:${topFrame.location.lineNumber}` : "";
+        delete args._agentSession;
+        delete args._agentSessionId;
+        return fail(
+          `Debugger is paused on this tab. Handle it first.${location}\n` +
+          `Reason: ${paused.reason}\n` +
+          `→ Use debug tool with action: 'resume', 'step_over', 'step_into', 'step_out', 'call_stack', or 'evaluate_on_frame'\n` +
+          `Auto-resume in ${CDP_DEBUGGER_TIMEOUT / 1000}s if not handled.`
         );
       }
     }
@@ -4167,7 +4635,7 @@ function appendConsoleErrors(result, tabId) {
 // ─── MCP Server Setup ───────────────────────────────────────────────
 
 const server = new Server(
-  { name: "cdp-browser", version: "4.8.1" },
+  { name: "cdp-browser", version: "4.9.0" },
   { capabilities: { tools: {} } }
 );
 

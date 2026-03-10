@@ -2,6 +2,28 @@
 
 All notable changes to CDP Browser MCP Server will be documented in this file.
 
+## [4.9.0] — 2026-03-10
+
+### Added — Web Resource Debugging (Phase 5)
+
+New `debug` tool (#11) with 21 actions for JavaScript debugging, resource overrides, and DOM/event breakpoints.
+
+### Added
+- **`debug` tool** — new tool #11 with JavaScript debugger, resource override, and DOM/event breakpoint capabilities
+- **Debugger core** (14 actions): `enable`, `disable`, `set_breakpoint`, `remove_breakpoint`, `list_breakpoints`, `pause`, `resume`, `step_over`, `step_into`, `step_out`, `call_stack`, `evaluate_on_frame`, `list_scripts`, `get_source`
+- **Resource overrides** (3 actions): `override_resource` (pre-register URL regex → response body for automatic fulfillment), `remove_override`, `list_overrides`
+- **DOM/Event breakpoints** (4 actions): `set_dom_breakpoint`, `remove_dom_breakpoint`, `set_event_breakpoint`, `remove_event_breakpoint`
+- **Debugger pause guard** — when debugger is paused, blocks all non-debug tool calls on that tab (allows `page.dialog` through for dialog handling)
+- **Auto-resume safety timeout** — paused tabs auto-resume after 30s (`CDP_DEBUGGER_TIMEOUT` env var) to prevent permanently frozen tabs
+- **5 new state maps**: `pausedTabs`, `parsedScripts`, `activeBreakpoints`, `resourceOverrides`, `fetchPatterns` — all cleaned up in `detachTab` + WebSocket close handler
+- **Unified Fetch pattern registry** — `refreshFetchPatterns()` helper merges request-stage (intercept) and response-stage (override) patterns into a single `Fetch.enable` call. Response-stage uses `"*"` catch-all with JS regex matching in the event handler
+- **Response-stage Fetch handling** — `handleEvent` now distinguishes request vs response stage pauses via `responseStatusCode` presence
+
+### Changed
+- **`handleInterceptEnable`** — refactored to use unified `fetchPatterns` map + `refreshFetchPatterns()` instead of direct `Fetch.enable`
+- **`handleInterceptDisable`** — only clears request-stage patterns; response-stage overrides preserved if active
+- **Bump version to 4.9.0**
+
 ## [4.8.1] — 2026-03-10
 
 ### Performance
