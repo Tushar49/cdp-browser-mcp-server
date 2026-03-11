@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 /**
- * CDP Browser Automation — MCP Server  v4.9
+ * CDP Browser Automation — MCP Server  v4.11.1
  *
- * 11 tools with 84+ sub-actions for full browser automation.
+ * 11 tools with 86+ sub-actions for full browser automation.
  * Features: stable element refs (backendNodeId), auto-waiting, incremental snapshots,
  * per-agent session isolation with tab locking, framework-aware inputs, modal guards,
  * human-like interaction mode, Chrome instance/profile management, JavaScript debugger
@@ -20,14 +20,14 @@
  *   storage   — Cookies, localStorage, indexedDB, cache, quota
  *   intercept — HTTP request interception, mocking, blocking via Fetch domain
  *   cleanup   — Disconnect sessions, clean temp files, status, list_sessions, session, reset
- *   browser   — Chrome instance discovery, profile listing, connection switching
+ *   browser   — Browser instance discovery (Chrome, Edge, Brave), profile listing, connection switching
  *   debug     — JS debugger (breakpoints, stepping, call stack), resource overrides, DOM/event breakpoints
  *
- * Setup:  chrome://flags/#enable-remote-debugging → Enabled → Relaunch
+ * Setup:  chrome://flags/#enable-remote-debugging → Enabled → Relaunch (or edge://flags for Edge)
  *
  * Env vars:
- *   CDP_PORT              Chrome debugging port             (default: 9222)
- *   CDP_HOST              Chrome debugging host             (default: 127.0.0.1)
+ *   CDP_PORT              Browser debugging port            (default: 9222)
+ *   CDP_HOST              Browser debugging host            (default: 127.0.0.1)
  *   CDP_TIMEOUT           Command timeout in ms             (default: 30000)
  *   CDP_SESSION_TTL       Agent session TTL in ms           (default: 300000)
  *   CDP_USER_DATA         Chrome User Data directory path
@@ -51,11 +51,11 @@ import { fileURLToPath } from "url";
 
 const CDP_HOST = process.env.CDP_HOST || "127.0.0.1";
 const CDP_PORT = process.env.CDP_PORT || "9222";
-const CDP_TIMEOUT = parseInt(process.env.CDP_TIMEOUT || "30000");
+const CDP_TIMEOUT = parseInt(process.env.CDP_TIMEOUT) || 30000;
 const SESSION_TTL = parseInt(process.env.CDP_SESSION_TTL) || 300000;
 const LONG_TIMEOUT = 120_000;
 const MAX_INLINE_LEN = 60_000;
-const CDP_DEBUGGER_TIMEOUT = parseInt(process.env.CDP_DEBUGGER_TIMEOUT || "30000");
+const CDP_DEBUGGER_TIMEOUT = parseInt(process.env.CDP_DEBUGGER_TIMEOUT) || 30000;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const REPO_ROOT = dirname(__dirname); // up from MCP Server/ to repo root
@@ -139,8 +139,9 @@ const parsedScripts = new Map();          // cdpSessionId → Map<scriptId, { ur
 const activeBreakpoints = new Map();      // cdpSessionId → Map<breakpointId, { url, lineNumber, columnNumber, condition }>
 const resourceOverrides = new Map();      // cdpSessionId → [{ urlPattern, responseCode, headers, body }]
 const fetchPatterns = new Map();          // cdpSessionId → { request: [...], response: [...] }
+const pendingFileChoosers = new Map();    // cdpSessionId → [handler functions waiting for file chooser]
 
-const NO_ENABLE = new Set(["Input", "Target", "Browser", "Accessibility", "DOM", "Emulation", "Storage"]);
+const NO_ENABLE = new Set(["Input", "Target", "Browser", "Accessibility", "DOM", "Emulation", "Storage", "Fetch"]);
 
 // ─── Connection Health ──────────────────────────────────────────────
 
@@ -165,6 +166,8 @@ function getWsUrl() {
     overrideUserDataDir,  // browser.connect override — takes priority
     process.env.CDP_USER_DATA,
     join(process.env.LOCALAPPDATA || "", "Google", "Chrome", "User Data"),
+    join(process.env.LOCALAPPDATA || "", "Microsoft", "Edge", "User Data"),
+    join(process.env.LOCALAPPDATA || "", "BraveSoftware", "Brave-Browser", "User Data"),
   ].filter(Boolean);
   for (const p of paths) {
     try {
@@ -189,6 +192,8 @@ function discoverChromeInstances({ skipProfiles = false } = {}) {
     { name: "Chrome Beta", path: join(process.env.LOCALAPPDATA || "", "Google", "Chrome Beta", "User Data") },
     { name: "Chrome Canary", path: join(process.env.LOCALAPPDATA || "", "Google", "Chrome SxS", "User Data") },
     { name: "Chromium", path: join(process.env.LOCALAPPDATA || "", "Chromium", "User Data") },
+    { name: "Edge", path: join(process.env.LOCALAPPDATA || "", "Microsoft", "Edge", "User Data") },
+    { name: "Brave", path: join(process.env.LOCALAPPDATA || "", "BraveSoftware", "Brave-Browser", "User Data") },
   ];
   if (process.env.CDP_USER_DATA) {
     candidates.unshift({ name: "Custom", path: process.env.CDP_USER_DATA });
@@ -255,12 +260,17 @@ function connectBrowser() {
         // Always refresh wsUrl — Chrome regenerates the GUID on every restart
         activeConnectionInfo.wsUrl = browserWs.url;
       }
+      // Enable popup/new-tab detection via browser-level Target events
+      cdp("Target.setDiscoverTargets", { discover: true }).catch(() => {});
       resolve();
     });
     browserWs.once("error", () =>
       reject(new Error(
-        "Cannot connect to Chrome. Enable remote debugging: " +
-        "chrome://flags → #enable-remote-debugging → Enabled → Relaunch."
+        "Cannot connect to browser. Enable remote debugging:\n" +
+        "Chrome: chrome://flags → #enable-remote-debugging → Enabled → Relaunch\n" +
+        "Edge: edge://flags → #enable-remote-debugging → Enabled → Relaunch\n" +
+        "Brave: brave://flags → #enable-remote-debugging → Enabled → Relaunch\n" +
+        "Or launch with --remote-debugging-port=" + CDP_PORT
       ))
     );
     browserWs.on("message", (raw) => {
@@ -275,6 +285,25 @@ function connectBrowser() {
       }
       if (msg.method && msg.sessionId) {
         handleEvent(msg.sessionId, msg.method, msg.params);
+      }
+      // Browser-level events (no sessionId) — popup/new-window detection
+      if (msg.method === "Target.targetCreated" && msg.params?.targetInfo?.type === "page") {
+        const ti = msg.params.targetInfo;
+        const openerId = ti.openerId;
+        if (openerId) {
+          // This is a popup opened by another page — log it
+          const openerSess = activeSessions.get(openerId);
+          if (openerSess) {
+            const logs = consoleLogs.get(openerSess) || [];
+            logs.push({
+              level: "info",
+              text: `[popup] New tab opened: ${ti.url || "about:blank"} [${ti.targetId}]`,
+              ts: Date.now(),
+              url: "",
+            });
+            consoleLogs.set(openerSess, logs);
+          }
+        }
       }
     });
     browserWs.on("close", () => {
@@ -297,6 +326,7 @@ function connectBrowser() {
       activeBreakpoints.clear();
       resourceOverrides.clear();
       fetchPatterns.clear();
+      pendingFileChoosers.clear();
       browserWs = null;
       activeConnectionInfo = null;
       overrideUserDataDir = null;
@@ -469,7 +499,7 @@ function handleEvent(sessionId, method, params) {
               requestId: params.requestId,
               responseCode: override.responseCode || 200,
               responseHeaders: override.headers || [{ name: "Content-Type", value: "text/html" }],
-              ...(override.body ? { body: Buffer.from(override.body).toString("base64") } : {}),
+              body: Buffer.from(override.body ?? "").toString("base64"),
             }, sessionId);
           } catch { /* ok */ }
         })();
@@ -570,6 +600,14 @@ function handleEvent(sessionId, method, params) {
   if (method === "Debugger.resumed") {
     pausedTabs.delete(sessionId);
   }
+
+  // ── File chooser events ──
+  if (method === "Page.fileChooserOpened") {
+    const handlers = pendingFileChoosers.get(sessionId) || [];
+    for (const handler of handlers) {
+      handler(sessionId, method, params);
+    }
+  }
 }
 
 // ─── CDP Command ────────────────────────────────────────────────────
@@ -601,17 +639,32 @@ async function getTabSession(tabId) {
       await cdp("Runtime.evaluate", { expression: "1", returnByValue: true }, existing, 5000);
       return existing;
     } catch {
-      // Session may be broken — save state to migrate to new session
-      const oldPendingDialogs = pendingDialogs.get(existing);
-      activeSessions.delete(tabId);
-      enabledDomains.delete(existing);
-
       // If dialogs are pending, the evaluate may have failed because JS is blocked
-      // by a dialog. Return the existing session so the dialog can be handled.
+      // by a dialog — session is still valid, just needs the dialog dismissed.
+      const oldPendingDialogs = pendingDialogs.get(existing);
       if (oldPendingDialogs?.length > 0) {
-        activeSessions.set(tabId, existing);
         return existing;
       }
+
+      // Session truly dead — clean up all per-session state for the dead session ID
+      activeSessions.delete(tabId);
+      enabledDomains.delete(existing);
+      pendingDialogs.delete(existing);
+      consoleLogs.delete(existing);
+      networkReqs.delete(existing);
+      refMaps.delete(existing);
+      lastSnapshots.delete(existing);
+      injectedScripts.delete(existing);
+      eventListeners.delete(existing);
+      downloads.delete(existing);
+      fetchRules.delete(existing);
+      pendingFetchRequests.delete(existing);
+      pausedTabs.delete(existing);
+      parsedScripts.delete(existing);
+      activeBreakpoints.delete(existing);
+      resourceOverrides.delete(existing);
+      fetchPatterns.delete(existing);
+      pendingFileChoosers.delete(existing);
     }
   }
 
@@ -685,6 +738,7 @@ async function detachTab(tabId) {
   activeBreakpoints.delete(sid);
   resourceOverrides.delete(sid);
   fetchPatterns.delete(sid);
+  pendingFileChoosers.delete(sid);
 }
 
 // ─── Tab Listing ────────────────────────────────────────────────────
@@ -1383,7 +1437,7 @@ const TOOLS = [
       "Operations:",
       "- list: List all open browser tabs with their IDs, URLs, and titles",
       "- find: Search tabs by title or URL substring (requires: query)",
-      "- new: Open a new tab (optional: url — defaults to about:blank)",
+      "- new: Open a new tab (optional: url — defaults to about:blank, activate — bring to foreground, default: false)",
       "- close: Close a specific tab (requires: tabId)",
       "- activate: Bring a tab to the foreground (requires: tabId)",
       "- info: Get detailed info about a tab including URL, title, and connection status (requires: tabId)",
@@ -1401,6 +1455,7 @@ const TOOLS = [
         query: { type: "string", description: "Search text for 'find' action." },
         tabId: { type: "string", description: "Tab ID for close/activate/info." },
         url: { type: "string", description: "URL for 'new' action." },
+        activate: { type: "boolean", description: "Bring new tab to foreground (default: false — opens in background without stealing focus)." },
         showAll: { type: "boolean", description: "Show all browser tabs, not just session-owned ones (for list action)." },
         sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
         cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs, 'detach' keeps them, 'none' skips cleanup. Sticky per session." },
@@ -1423,7 +1478,7 @@ const TOOLS = [
       "- reload: Reload the current page (requires: tabId; optional: ignoreCache, waitUntil, timeout)",
       "- snapshot: Capture accessibility tree snapshot with element refs for interaction (requires: tabId)",
       "- screenshot: Take a screenshot of the page or a specific element (requires: tabId; optional: fullPage, quality, uid, type[png|jpeg], path — absolute file path to save to disk)",
-      "- content: Extract text or HTML content from the page or an element (requires: tabId; optional: uid, selector, format[text|html])",
+      "- content: Extract text or HTML content from the page or an element (requires: tabId; optional: uid, selector, format[text|html|full] — 'full' returns complete document HTML with doctype)",
       "- set_content: Set the page's HTML content directly (requires: tabId, html)",
       "- wait: Wait for condition or fixed delay (requires: tabId; provide text, textGone, selector for polling — or just timeout for fixed delay; optional: timeout[ms], state[visible|hidden|attached|detached] for selector waits)",
       "- pdf: Export page as PDF to temp file (requires: tabId; optional: landscape, scale, paperWidth, paperHeight, margin{top,bottom,left,right})",
@@ -1459,7 +1514,7 @@ const TOOLS = [
         path: { type: "string", description: "Absolute file path to save screenshot to disk (e.g. 'C:/screenshots/step1.png'). Returns file path instead of base64 image." },
         uid: { type: "number", description: "Element uid for screenshot/content." },
         selector: { type: "string", description: "CSS selector for content/wait." },
-        format: { type: "string", enum: ["text", "html"], description: "Content format." },
+        format: { type: "string", enum: ["text", "html", "full"], description: "Content format. 'text' (default) for visible text, 'html' for innerHTML, 'full' for complete document HTML with doctype." },
         text: { type: "string", description: "Text to wait for / dialog prompt text." },
         textGone: { type: "string", description: "Text to wait to disappear." },
         timeout: { type: "number", description: "Timeout in milliseconds. With text/textGone/selector: max polling time (default: 10000ms). Alone: fixed delay like Playwright's waitForTimeout. Max: 60000ms." },
@@ -1499,7 +1554,7 @@ const TOOLS = [
       "- press: Press a keyboard key with optional modifiers (requires: tabId, key; optional: modifiers[Control|Shift|Alt|Meta])",
       "- drag: Drag an element to another element (requires: tabId, sourceUid or sourceSelector, targetUid or targetSelector; optional: timeout)",
       "- scroll: Scroll the page or a specific element (requires: tabId; optional: direction[up|down|left|right], amount[default:400px], x, y for absolute scroll, uid or selector for scrolling within an element, timeout)",
-      "- upload: Upload files to a file input (requires: tabId, files — array of absolute file paths, uid or selector; optional: timeout)",
+      "- upload: Upload files to a file input or intercept a file chooser dialog. With uid/selector: sets files directly on a <input type=file>. Without uid/selector: waits for the next file chooser dialog (click the upload button first) (requires: tabId, files — array of absolute file paths; optional: uid or selector, timeout)",
       "- focus: Focus an element and scroll it into view (requires: tabId, uid or selector; optional: timeout)",
       "- check: Set a checkbox to checked or unchecked (requires: tabId, checked[true|false], uid or selector; optional: timeout)",
       "- tap: Tap an element using touch events (requires: tabId, uid or selector; optional: timeout)",
@@ -1607,7 +1662,7 @@ const TOOLS = [
   {
     name: "observe",
     description: [
-      "Monitor browser console messages, network requests, retrieve full request/response bodies, and measure page performance metrics.",
+      "Monitor browser console messages, network requests, retrieve full request/response bodies, measure page performance metrics, and export HAR.",
       "",
       "Operations:",
       "- console: Retrieve captured console messages (requires: tabId; optional: level[all|error|warning|log|info|debug], last — return only last N entries, clear — clear after returning)",
@@ -1615,11 +1670,13 @@ const TOOLS = [
       "- request: Get the full request and response body for a specific network request (requires: tabId, requestId — from network listing)",
       "- performance: Collect page performance metrics including DOM size, JS heap, layout counts, and paint timing (requires: tabId)",
       "- downloads: List tracked file downloads with progress info (requires: tabId; optional: last, clear)",
+      "- har: Export captured network requests as HAR 1.2 JSON (requires: tabId)",
       "",
       "Network Resource Types: xhr, fetch, document, script, stylesheet, image, font, media, websocket, other",
       "",
       "Notes:",
       "- Console and network monitoring starts automatically when first queried — no explicit enable needed",
+      "- Popups/new windows opened by pages are auto-detected and logged to the opener tab's console as [popup] entries",
       "- Use 'clear: true' to reset captured data between test iterations",
     ].join("\n"),
     annotations: {
@@ -1631,7 +1688,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["console", "network", "request", "performance", "downloads"], description: "Observe action." },
+        action: { type: "string", enum: ["console", "network", "request", "performance", "downloads", "har"], description: "Observe action." },
         tabId: { type: "string", description: "Tab ID." },
         level: { type: "string", enum: ["all", "error", "warning", "log", "info", "debug"], description: "Console level filter." },
         filter: { type: "string", description: "Network URL filter." },
@@ -1840,15 +1897,16 @@ const TOOLS = [
   {
     name: "browser",
     description: [
-      "Chrome instance and profile management. Detect running Chrome instances, switch connections, and view profile information.",
+      "Browser instance and profile management. Detect running Chromium-based browsers (Chrome, Edge, Brave, etc.), switch connections, and view profile information.",
       "",
       "Operations:",
-      "- profiles: List all detected Chrome instances with their profiles, ports, and connection status (no parameters)",
-      "- connect: Switch to a different Chrome instance by name, port, or User Data directory path (requires: instance — name like 'Chrome' or 'Chrome Canary', or port number, or path to User Data dir)",
-      "- active: Show the currently connected Chrome instance, port, profiles, and WebSocket URL (no parameters)",
+      "- profiles: List all detected browser instances with their profiles, ports, and connection status (no parameters)",
+      "- connect: Switch to a different browser instance by name, port, or User Data directory path (requires: instance — name like 'Chrome', 'Edge', or 'Brave', or port number, or path to User Data dir)",
+      "- active: Show the currently connected browser instance, port, profiles, and WebSocket URL (no parameters)",
       "",
       "Notes:",
-      "- All Chrome profiles within one instance share a single debug port — you cannot connect to a specific profile, only to an instance",
+      "- All Chromium-based browsers use the same CDP protocol — Chrome, Edge, Brave, Chromium all work",
+      "- All profiles within one browser instance share a single debug port — you cannot connect to a specific profile, only to an instance",
       "- Each profile's tabs are distinguishable via browserContextId in tab info",
       "- Switching instances requires no other active agent sessions (use cleanup.session to end them first)",
       "- Set CDP_PROFILE env var to auto-connect to a specific User Data directory at startup",
@@ -1863,7 +1921,7 @@ const TOOLS = [
       type: "object",
       properties: {
         action: { type: "string", enum: ["profiles", "connect", "active"], description: "Browser action." },
-        instance: { type: "string", description: "Chrome instance to connect to — name (e.g. 'Chrome Canary'), port number, or User Data directory path." },
+        instance: { type: "string", description: "Browser instance to connect to — name (e.g. 'Chrome', 'Edge', 'Brave'), port number, or User Data directory path." },
       },
       required: ["action"],
     },
@@ -1995,13 +2053,14 @@ async function handleTabsFind(args) {
 
 async function handleTabsNew(args) {
   const url = args.url || "about:blank";
-  const { targetId } = await cdp("Target.createTarget", { url });
+  const background = args.activate === false || args.activate === undefined; // default: open in background
+  const { targetId } = await cdp("Target.createTarget", { url, background });
   // Register ownership immediately so tabs.list shows it right away
   if (args._agentSession) {
     args._agentSession.tabIds.add(targetId);
     tabLocks.set(targetId, { sessionId: args._agentSessionId, origin: "created" });
   }
-  return ok(`New tab: [${targetId}]\nURL: ${url}`);
+  return ok(`New tab: [${targetId}]\nURL: ${url}${background ? '' : ' (activated)'}`);
 }
 
 async function handleTabsClose(args) {
@@ -2109,24 +2168,31 @@ async function handlePageSnapshot(args) {
   const prev = lastSnapshots.get(sess);
   lastSnapshots.set(sess, { snapshot: snap.snapshot, url: snap.url, title: snap.title });
 
+  let fullText;
   if (prev && prev.url === snap.url) {
     const prevLines = prev.snapshot.split("\n");
     const currLines = snap.snapshot.split("\n");
     const diff = computeSnapshotDiff(prevLines, currLines);
     if (diff.changed && diff.lines.length < currLines.length * 0.8) {
-      // Diff is meaningfully smaller than full snapshot
-      const diffText = diff.lines.join("\n");
-      return ok(
-        header +
+      fullText = header +
         `### Changes (${diff.added} added, ${diff.removed} removed)\n` +
-        diffText +
+        diff.lines.join("\n") +
         `\n\n### Full Snapshot\n` +
-        snap.snapshot
-      );
+        snap.snapshot;
     }
   }
+  if (!fullText) fullText = header + snap.snapshot;
 
-  return ok(header + snap.snapshot);
+  // If snapshot overflows, auto-capture a screenshot for visual context
+  if (fullText.length > MAX_INLINE_LEN) {
+    try {
+      const { data } = await cdp("Page.captureScreenshot", { format: "jpeg", quality: 60 }, sess);
+      const screenshotPath = writeTempFile(`snapshot-overflow-${Date.now()}.jpg`, Buffer.from(data, "base64"), null, args._agentSessionId);
+      fullText += `\n\n[Screenshot saved for visual context: ${screenshotPath}]`;
+    } catch { /* screenshot failed — don't break the snapshot */ }
+  }
+
+  return ok(fullText);
 }
 
 /** Compute a simple line-level diff between two snapshots */
@@ -2390,6 +2456,17 @@ async function handlePageScreenshot(args) {
 
 async function handlePageContent(args) {
   const sess = await getTabSession(args.tabId);
+  // format: "full" returns complete document HTML with doctype (ignores uid/selector)
+  if (args.format === "full") {
+    if (args.uid !== undefined || args.selector) {
+      return fail("format: 'full' returns the entire document \u2014 uid/selector not supported. Use format: 'html' for element HTML.");
+    }
+    const result = await cdp("Runtime.evaluate", {
+      expression: `(document.doctype ? new XMLSerializer().serializeToString(document.doctype) + '\n' : '') + document.documentElement.outerHTML`,
+      returnByValue: true,
+    }, sess);
+    return ok(result.result.value ?? "(empty)");
+  }
   const prop = args.format === "html" ? "innerHTML" : "innerText";
   if (args.uid !== undefined || args.selector) {
     const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
@@ -3084,7 +3161,40 @@ async function handleInteractUpload(args) {
   const sess = await getTabSession(args.tabId);
   const retryTimeout = args.timeout || 5000;
 
-  // Resolve element via resolveElementObjectId with retry
+  // If no element specified, intercept the next file chooser dialog
+  if (!args.uid && !args.selector) {
+    // Register handler BEFORE enabling interception to avoid race condition
+    let fileChooserHandler;
+    const chooserPromise = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error("No file chooser dialog appeared within 10s. Click the upload button first, then call upload."));
+      }, 10000);
+      fileChooserHandler = (sid, method, params) => {
+        if (sid === sess && method === "Page.fileChooserOpened") {
+          clearTimeout(timeout);
+          resolve(params);
+        }
+      };
+      const pending = pendingFileChoosers.get(sess) || [];
+      pending.push(fileChooserHandler);
+      pendingFileChoosers.set(sess, pending);
+    });
+    // Enable interception after handler is registered
+    await cdp("Page.setInterceptFileChooserDialog", { enabled: true }, sess);
+    try {
+      await chooserPromise;
+      // Page.fileChooserOpened provides { frameId, mode } — use Page.handleFileChooser to accept
+      await cdp("Page.handleFileChooser", { action: "accept", files: args.files }, sess);
+    } finally {
+      // Clean up handler
+      const pending = pendingFileChoosers.get(sess) || [];
+      pendingFileChoosers.set(sess, pending.filter(h => h !== fileChooserHandler));
+      try { await cdp("Page.setInterceptFileChooserDialog", { enabled: false }, sess); } catch { /* ok */ }
+    }
+    return ok(`Uploaded ${args.files.length} file(s) via file chooser: ${args.files.map(f => f.split(/[/\\]/).pop()).join(", ")}`);
+  }
+
+  // Element specified — use direct file input approach
   const objectId = await withRetry(() => resolveElementObjectId(sess, args.uid, args.selector), { timeout: retryTimeout });
 
   // Describe node to get backendNodeId for setFileInputFiles
@@ -3366,6 +3476,62 @@ async function handleObserveDownloads(args) {
     return `[${d.state}]${pct}${size} ${d.suggestedFilename} — ${d.url.substring(0, 120)}`;
   });
   return ok(`${dl.length} download(s):\n\n${lines.join("\n")}`);
+}
+
+async function handleObserveHar(args) {
+  const sess = await getTabSession(args.tabId);
+  await enableMonitoring(sess, "network");
+
+  const reqMap = networkReqs.get(sess) || new Map();
+  const reqs = Array.from(reqMap.values());
+  if (!reqs.length) return ok("No network requests captured yet. Navigate or interact first.");
+
+  // Build HAR 1.2 structure
+  const entries = reqs.map(r => ({
+    startedDateTime: new Date(r.ts).toISOString(),
+    time: 0,
+    request: {
+      method: r.method || "GET",
+      url: r.url,
+      httpVersion: "HTTP/1.1",
+      cookies: [],
+      headers: [],
+      queryString: [],
+      headersSize: -1,
+      bodySize: -1,
+    },
+    response: {
+      status: r.status || 0,
+      statusText: "",
+      httpVersion: "HTTP/1.1",
+      cookies: [],
+      headers: [],
+      content: {
+        size: r.size || 0,
+        mimeType: r.mimeType || "",
+      },
+      redirectURL: "",
+      headersSize: -1,
+      bodySize: r.size || -1,
+    },
+    cache: {},
+    timings: { send: 0, wait: 0, receive: 0 },
+  }));
+
+  const har = {
+    log: {
+      version: "1.2",
+      creator: { name: "CDP Browser MCP Server", version: "4.11.0" },
+      entries,
+    },
+  };
+
+  const json = JSON.stringify(har, null, 2);
+  if (json.length > MAX_INLINE_LEN) {
+    const path = writeTempFile(`har-${Date.now()}.json`, json, "utf8", args._agentSessionId);
+    return ok(`HAR exported (${entries.length} entries, ${json.length} chars).\nSaved to: ${path}`);
+  }
+  return ok(json);
 }
 
 // ─── Emulate Handler ────────────────────────────────────────────────
@@ -3676,21 +3842,41 @@ async function handleStorageQuota(args) {
 
 // ─── Intercept Handlers ─────────────────────────────────────────────
 
+/**
+ * Re-issue Fetch.enable with the unified set of request-stage + response-stage patterns.
+ * CDP Fetch.enable REPLACES the entire config — it is NOT additive.
+ * Request-stage patterns use CDP glob syntax (from intercept.enable).
+ * Response-stage always uses "*" catch-all — JS regex matching in handleEvent does precision filtering.
+ */
+async function refreshFetchPatterns(sess) {
+  const p = fetchPatterns.get(sess) || { request: [], response: [] };
+  const allPatterns = [
+    ...p.request.map(url => ({ urlPattern: url, requestStage: "Request" })),
+    ...(p.response.length > 0 ? [{ urlPattern: "*", requestStage: "Response" }] : []),
+  ];
+  if (allPatterns.length === 0) {
+    try { await cdp("Fetch.disable", {}, sess); } catch { /* ok */ }
+  } else {
+    try { await cdp("Fetch.enable", { patterns: allPatterns }, sess); } catch { /* session may be stale */ }
+  }
+}
+
 async function handleInterceptEnable(args) {
   const sess = await getTabSession(args.tabId);
+  const patterns = args.patterns || ["*"];
 
-  const patterns = (args.patterns || ["*"]).map(p => ({
-    urlPattern: p,
-    requestStage: "Request",
-  }));
+  // Save to unified pattern store (request-stage)
+  const p = fetchPatterns.get(sess) || { request: [], response: [] };
+  p.request = patterns;
+  fetchPatterns.set(sess, p);
 
-  await cdp("Fetch.enable", { patterns }, sess);
+  // Re-issue Fetch.enable with ALL patterns (request + response)
+  await refreshFetchPatterns(sess);
 
-  // Initialize tracking maps
   if (!pendingFetchRequests.has(sess)) pendingFetchRequests.set(sess, new Map());
   if (!fetchRules.has(sess)) fetchRules.set(sess, []);
 
-  return ok(`Request interception enabled.\nPatterns: ${patterns.map(p => p.urlPattern).join(", ")}\nPaused requests will auto-continue after 10s if not handled.`);
+  return ok(`Request interception enabled.\nPatterns: ${patterns.join(", ")}\nPaused requests will auto-continue after 10s if not handled.`);
 }
 
 async function handleInterceptDisable(args) {
@@ -3792,6 +3978,8 @@ async function handleDebugEnable(args) {
 async function handleDebugDisable(args) {
   const sess = await getTabSession(args.tabId);
   try { await cdp("Debugger.disable", {}, sess); } catch { /* ok */ }
+  const doms = enabledDomains.get(sess);
+  if (doms) doms.delete("Debugger");
   pausedTabs.delete(sess);
   parsedScripts.delete(sess);
   activeBreakpoints.delete(sess);
@@ -4385,6 +4573,7 @@ const HANDLERS = {
     request: handleObserveRequest,
     performance: handleObservePerformance,
     downloads: handleObserveDownloads,
+    har: handleObserveHar,
   },
   emulate: handleEmulate,
   storage: {

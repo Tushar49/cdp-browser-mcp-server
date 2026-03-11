@@ -2,6 +2,63 @@
 
 All notable changes to CDP Browser MCP Server will be documented in this file.
 
+## [4.11.1] — 2026-03-12
+
+### Fixed
+- **Unhandled Promise rejection crash** — `Target.setDiscoverTargets` call during browser connection now uses `.catch()` instead of try/catch around a floating Promise. Previously, if the CDP call failed, the rejected Promise was unhandled and could crash the Node.js process
+- **`page.content` format:"full" guard** — now returns an explicit error when `uid` or `selector` is passed with `format: "full"` instead of silently ignoring them
+- **Popup console log URL** — synthetic `[popup]` entries now use empty string for URL field instead of `"Target.targetCreated"` which could confuse URL-based filtering
+- **Server header action count** — corrected "84+" to "86+" matching README badge
+
+## [4.11.0] — 2026-03-12
+
+### Added — Phase 6: Playwright Audit Priority B
+- **`page.content` format: "full"** — new format option returns complete document HTML with doctype via `document.documentElement.outerHTML`. Existing `text` and `html` formats unchanged
+- **`observe.har`** — new action exports captured network requests as HAR 1.2 JSON. Auto-saves to temp file when output exceeds 60KB
+- **Snapshot overflow screenshot** — when `page.snapshot` output exceeds 60KB and spills to temp file, a JPEG screenshot is auto-captured alongside for visual context
+- **Popup/new-window detection** — browser-level `Target.targetCreated` events are now monitored. Popups opened by pages are auto-logged to the opener tab's console as `[popup]` entries, visible via `observe.console`
+
+## [4.10.1] — 2026-03-11
+
+### Fixed
+- **File chooser TDZ crash** — rewrote Promise pattern to extract handler variable outside constructor, fixing `ReferenceError: Cannot access 'chooserPromise' before initialization` that made the file chooser upload path 100% non-functional
+- **Wrong CDP API for file chooser** — replaced `DOM.setFileInputFiles` with `Page.handleFileChooser({ action: "accept", files })`. `Page.fileChooserOpened` returns `{ frameId, mode }` not `backendNodeId`
+- **File chooser race condition** — handler is now registered before `Page.setInterceptFileChooserDialog` is enabled, preventing missed events
+- **`pendingFileChoosers.clear()` missing** — added to WebSocket close handler alongside the other 17 state map clears
+- **Brave flag URL** — `brave://flags` added to connection error message alongside Chrome and Edge
+- **README tables** — `tabs.new` row now shows `activate` parameter; `upload` row shows `uid`/`selector` as optional
+- **CHANGELOG v4.10.0** — corrected false claim that `discoverChromeInstances()` was renamed
+
+## [4.10.0] — 2026-03-11
+
+### Added
+- **Multi-browser support** — Edge and Brave added to auto-discovery and connection fallback paths alongside Chrome, Chrome Beta, Chrome Canary, and Chromium. Any Chromium-based browser at the configured port now works out of the box
+- **File chooser dialog interception** — `interact.upload` can now be called without `uid`/`selector` to intercept the next OS file chooser dialog. Click the upload button first, then call upload with just `files` to handle custom upload buttons that trigger file choosers programmatically
+- **Background tab creation** — `tabs.new` now opens tabs in the background by default (no focus stealing). Pass `activate: true` to bring the new tab to the foreground
+
+### Changed
+- Browser tool description and error messages updated from Chrome-specific to browser-agnostic
+- `discoverChromeInstances()` now discovers all Chromium browsers (Edge, Brave added to candidates)
+- Connection error message now shows Chrome, Edge, and Brave flag URLs
+
+## [4.9.2] — 2026-03-11
+
+### Fixed
+- **Dialog branch regression** — session recovery in `getTabSession` now checks for pending dialogs *before* deleting per-session state. Previously the F5 fix (v4.9.1) unconditionally wiped all maps then tried to restore the session for dialog handling, leaving overrides, breakpoints, console logs, and network data irreversibly lost
+- **Debugger disable→re-enable broken** — `handleDebugDisable` now removes `"Debugger"` from `enabledDomains` after calling `Debugger.disable`. Previously `ensureDomain` saw the stale entry and skipped re-enabling, making `set_breakpoint` fail silently after a disable→enable cycle
+- **`pendingDialogs` orphan leak** — dead session IDs now have their `pendingDialogs` entry cleaned in the non-dialog recovery path
+- **`refreshFetchPatterns` error handling** — `Fetch.enable` call now wrapped in try-catch matching the `Fetch.disable` path, preventing raw CDP errors from surfacing on stale sessions
+- **CHANGELOG v4.9.1 count** — corrected "18 per-session state maps" to accurate count
+
+## [4.9.1] — 2026-03-11
+
+### Fixed
+- **NaN env var parsing** — `CDP_TIMEOUT` and `CDP_DEBUGGER_TIMEOUT` now use `parseInt(val) || default` pattern (matching `CDP_SESSION_TTL`). Previously, non-numeric env values like `"abc"` produced NaN, causing instant timeouts or 1ms auto-resume
+- **Session recovery state leak** — when a CDP session breaks and recovers, all per-session state maps are now cleaned for the dead session ID. Previously only `activeSessions` and `enabledDomains` were cleaned, orphaning console logs, network data, breakpoints, overrides, and fetch patterns under the dead ID
+- **`Fetch` added to `NO_ENABLE` set** — prevents `ensureDomain(sess, "Fetch")` from issuing a bare `Fetch.enable({})` that would clobber the carefully constructed patterns from `refreshFetchPatterns()`
+- **README emulate table** — added missing `autoDarkMode` and `idle` properties that were implemented but undocumented
+- **README comparison table** — corrected emulate option count from 16 to 15
+
 ## [4.9.0] — 2026-03-10
 
 ### Added — Web Resource Debugging (Phase 5)

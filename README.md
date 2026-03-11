@@ -7,9 +7,9 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-4.9.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-4.11.1-blue" alt="Version">
   <img src="https://img.shields.io/badge/tools-11-green" alt="Tools">
-  <img src="https://img.shields.io/badge/sub--actions-84+-green" alt="Actions">
+  <img src="https://img.shields.io/badge/sub--actions-86+-green" alt="Actions">
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen" alt="Node">
   <img src="https://img.shields.io/badge/license-MIT-yellow" alt="License">
 </p>
@@ -38,7 +38,7 @@ CDP Browser MCP Server connects to your **already-running** browser over a WebSo
 | Browser Use needs Python + LLM key | Heavy framework, double LLM cost |
 | BrowserTools MCP is read-only | Can observe but can't automate |
 
-**This server**: connects to Chrome on `localhost:9222`, uses the real browser state, and gives you **62+ automation actions** across 10 tools — all from a single `server.js` file with 2 dependencies. Geolocation spoofing automatically grants browser permissions so permission-based sites just work.
+**This server**: connects to Chrome on `localhost:9222`, uses the real browser state, and gives you **86+ automation actions** across 11 tools — all from a single `server.js` file with 2 dependencies. Geolocation spoofing automatically grants browser permissions so permission-based sites just work.
 
 ---
 
@@ -49,12 +49,12 @@ CDP Browser MCP Server connects to your **already-running** browser over a WebSo
 | Connects to real browser | **Yes** | Via flag only | No (cloud) | No | Read-only |
 | Preserves cookies/sessions | **Yes** | No | No | No | Yes |
 | Works with extensions | **Yes** | No | No | No | Yes |
-| Tool count | **10 tools, 62+ actions** | ~30 tools | ~10 tools | 7 tools | ~13 tools |
+| Tool count | **11 tools, 84+ actions** | ~30 tools | ~10 tools | 7 tools | ~13 tools |
 | Auto-waiting after actions | **Yes** | Yes | Yes | No | N/A |
 | Network interception | **Yes** (mock/block/modify) | No | No | No | Read-only |
 | HTTP request mocking | **Yes** | No | No | No | No |
 | Cookie/storage management | **Yes** (full CRUD) | File-based | Cloud profiles | User data dir | No |
-| Device emulation | **Yes** (16 options) | Partial | Limited | No | No |
+| Device emulation | **Yes** (15 options) | Partial | Limited | No | No |
 | Network throttling | **Yes** (6 presets) | No | No | No | No |
 | Performance metrics | **Yes** (DOM, heap, paint) | No | No | No | Lighthouse |
 | PDF export | **Yes** | Yes | No | No | No |
@@ -72,7 +72,7 @@ CDP Browser MCP Server connects to your **already-running** browser over a WebSo
 | Requires paid service | **No** | No | Yes | No | No |
 | Requires LLM API key | **No** | No | Yes | No | No |
 | Dependencies | **2** (ws, MCP SDK) | Playwright + browsers | API key + subscription | Puppeteer + Chromium | 3-part install |
-| Single file server | **Yes** (~3900 lines) | Multi-file package | Multi-file package | Multi-file | Multi-file |
+| Single file server | **Yes** (~4600 lines) | Multi-file package | Multi-file package | Multi-file | Multi-file |
 | Status | **Active** | Active | Active | **Deprecated** | Active |
 | Startup speed | **Instant** (WebSocket connect) | Slow (browser launch) | Slow (cloud API) | Slow (3-5 min w/ tabs) | N/A |
 
@@ -201,7 +201,7 @@ The server communicates over stdio using the MCP protocol. Any MCP-compatible cl
 |--------|-------------|----------|----------|
 | `list` | List all open tabs with IDs, URLs, titles | — | `showAll` |
 | `find` | Search tabs by title or URL substring | `query` | — |
-| `new` | Open a new tab | — | `url` |
+| `new` | Open a new tab (background by default) | — | `url`, `activate` |
 | `close` | Close a tab | `tabId` | — |
 | `activate` | Bring tab to foreground | `tabId` | — |
 | `info` | Get tab details + connection status | `tabId` | — |
@@ -216,7 +216,7 @@ The server communicates over stdio using the MCP protocol. Any MCP-compatible cl
 | `reload` | Reload page | `tabId` | `ignoreCache`, `waitUntil`, `timeout` |
 | `snapshot` | Accessibility tree with element refs | `tabId` | — |
 | `screenshot` | Capture page or element as image (fullPage scrolls SPA containers to trigger lazy loading) | `tabId` | `fullPage`, `quality`, `uid`, `type`, `path` |
-| `content` | Extract text or HTML | `tabId` | `uid`, `selector`, `format` |
+| `content` | Extract text, HTML, or full document source | `tabId` | `uid`, `selector`, `format`(`text`\|`html`\|`full`) |
 | `set_content` | Set page HTML content directly | `tabId`, `html` | — |
 | `wait` | Wait for condition or fixed delay | `tabId` | `text`, `textGone`, `selector`, `state`, `timeout`(ms) |
 | `pdf` | Export page as PDF | `tabId` | `landscape`, `scale`, `paperWidth`, `paperHeight`, `margin` |
@@ -237,7 +237,7 @@ The server communicates over stdio using the MCP protocol. Any MCP-compatible cl
 | `press` | Press keyboard key | `tabId`, `key` | `modifiers` |
 | `drag` | Drag element to target | `tabId`, source + target | `timeout`, `humanMode` |
 | `scroll` | Scroll page or element | `tabId` | `direction`, `amount`, `x`, `y`, `uid`, `timeout` |
-| `upload` | Upload files to file input | `tabId`, `files[]`, `uid` or `selector` | `timeout` |
+| `upload` | Upload files to file input or intercept file chooser dialog | `tabId`, `files[]` | `uid`, `selector`, `timeout` |
 | `focus` | Focus element + scroll into view | `tabId`, `uid` or `selector` | `timeout` |
 | `check` | Toggle checkbox | `tabId`, `checked`, `uid` or `selector` | `timeout` |
 | `tap` | Tap element using touch events | `tabId`, `uid` or `selector` | `timeout` |
@@ -261,6 +261,7 @@ The server communicates over stdio using the MCP protocol. Any MCP-compatible cl
 | `request` | Get full request/response body | `tabId`, `requestId` | — |
 | `performance` | DOM size, JS heap, layout metrics | `tabId` | — |
 | `downloads` | List tracked file downloads | `tabId` | `last`, `clear` |
+| `har` | Export captured network data as HAR 1.2 JSON | `tabId` | — |
 
 ### `emulate` — Device & Network Emulation
 
@@ -280,6 +281,8 @@ Set any combination of properties in a single call:
 | `ignoreSSL` | Bypass SSL errors | boolean |
 | `blockUrls` | Block URL patterns | string array |
 | `extraHeaders` | Set custom headers | object |
+| `autoDarkMode` | Force automatic dark mode | boolean |
+| `idle` | Emulate idle/locked screen state | `active`, `locked` |
 | `reset` | Clear all overrides | `true` |
 
 ### `storage` — Cookie & Storage Management
@@ -488,6 +491,7 @@ WebSocket ping/pong every 30 seconds. If 2 consecutive pings fail, the connectio
 | `CDP_SESSION_TTL` | `300000` | Agent session TTL in milliseconds (5 min) |
 | `CDP_PROFILE` | — | Auto-connect to Chrome instance by name or User Data path |
 | `CDP_USER_DATA` | — | Custom Chrome User Data directory path |
+| `CDP_DEBUGGER_TIMEOUT` | `30000` | Debugger auto-resume timeout in milliseconds |
 | `CDP_TEMP_DIR` | `.temp` | Directory for temp files (screenshots, PDFs) |
 
 ---
