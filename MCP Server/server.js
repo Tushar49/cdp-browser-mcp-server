@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 
 /**
- * CDP Browser Automation — MCP Server  v4.11.1
+ * CDP Browser Automation — MCP Server  v4.12.0
  *
- * 11 tools with 86+ sub-actions for full browser automation.
+ * 11 tools with 87+ sub-actions for full browser automation.
  * Features: stable element refs (backendNodeId), auto-waiting, incremental snapshots,
  * per-agent session isolation with tab locking, framework-aware inputs, modal guards,
  * human-like interaction mode, Chrome instance/profile management, JavaScript debugger
  * with breakpoints/stepping/call-stack inspection, resource overrides, DOM/event breakpoints,
- * auto-console-error reporting, connection health monitoring, download tracking.
+ * auto-console-error reporting, connection health monitoring, download tracking,
+ * cross-origin (OOP) iframe support via Target.setAutoAttach.
  *
  * Tools:
  *   tabs      — Tab lifecycle (list, find, new, close, activate, info)
@@ -140,6 +141,8 @@ const activeBreakpoints = new Map();      // cdpSessionId → Map<breakpointId, 
 const resourceOverrides = new Map();      // cdpSessionId → [{ urlPattern, responseCode, headers, body }]
 const fetchPatterns = new Map();          // cdpSessionId → { request: [...], response: [...] }
 const pendingFileChoosers = new Map();    // cdpSessionId → [handler functions waiting for file chooser]
+const oopFrameSessions = new Map();       // parentCdpSessionId → Map<targetId, { sessionId, url }>
+const refOopSessions = new Map();         // parentCdpSessionId → Map<uid, childCdpSessionId>
 
 const NO_ENABLE = new Set(["Input", "Target", "Browser", "Accessibility", "DOM", "Emulation", "Storage", "Fetch"]);
 
@@ -601,6 +604,31 @@ function handleEvent(sessionId, method, params) {
     pausedTabs.delete(sessionId);
   }
 
+  // ── OOP iframe auto-attach events ──
+  if (method === "Target.attachedToTarget") {
+    const childSessionId = params.sessionId;
+    const targetInfo = params.targetInfo;
+    if (targetInfo?.type === "iframe") {
+      const frames = oopFrameSessions.get(sessionId) || new Map();
+      frames.set(targetInfo.targetId, { sessionId: childSessionId, url: targetInfo.url || "" });
+      oopFrameSessions.set(sessionId, frames);
+      // Enable Runtime on the child session for JS execution
+      cdp("Runtime.enable", {}, childSessionId, 5000).catch(() => {});
+    }
+  }
+
+  if (method === "Target.detachedFromTarget") {
+    const frames = oopFrameSessions.get(sessionId);
+    if (frames) {
+      for (const [tid, info] of frames) {
+        if (params.sessionId === info.sessionId || params.targetId === tid) {
+          frames.delete(tid);
+          break;
+        }
+      }
+    }
+  }
+
   // ── File chooser events ──
   if (method === "Page.fileChooserOpened") {
     const handlers = pendingFileChoosers.get(sessionId) || [];
@@ -665,6 +693,8 @@ async function getTabSession(tabId) {
       resourceOverrides.delete(existing);
       fetchPatterns.delete(existing);
       pendingFileChoosers.delete(existing);
+      oopFrameSessions.delete(existing);
+      refOopSessions.delete(existing);
     }
   }
 
@@ -682,6 +712,15 @@ async function getTabSession(tabId) {
 
   // v3: Enable Page domain for dialog handling
   await ensureDomain(sessionId, "Page");
+
+  // v4.12: Enable auto-attach for OOP (cross-origin) iframe discovery
+  try {
+    await cdp("Target.setAutoAttach", {
+      autoAttach: true,
+      waitForDebuggerOnStart: false,
+      flatten: true,
+    }, sessionId);
+  } catch { /* older Chrome versions may not support auto-attach on page sessions */ }
 
   return sessionId;
 }
@@ -739,6 +778,8 @@ async function detachTab(tabId) {
   resourceOverrides.delete(sid);
   fetchPatterns.delete(sid);
   pendingFileChoosers.delete(sid);
+  oopFrameSessions.delete(sid);
+  refOopSessions.delete(sid);
 }
 
 // ─── Tab Listing ────────────────────────────────────────────────────
@@ -920,6 +961,87 @@ async function buildSnapshot(sessionId) {
       if (frameId) allLines.push(`  - [frame error: ${e.message?.substring(0, 60)}]`);
     }
   }
+
+  // ── OOP (cross-origin) iframe content via auto-attached child sessions ──
+  const oopFrames = oopFrameSessions.get(sessionId);
+  const newRouting = new Map();
+  if (oopFrames?.size > 0) {
+    let oopIndex = frameIds.length; // continue frame numbering
+    for (const [targetId, { sessionId: childSess, url: frameUrl }] of oopFrames) {
+      try {
+        const { nodes } = await cdp("Accessibility.getFullAXTree", {}, childSess);
+        if (!nodes || nodes.length === 0) continue;
+
+        const nodeMap = new Map();
+        for (const n of nodes) nodeMap.set(n.nodeId, n);
+        const roots = nodes.filter(n => !n.parentId || !nodeMap.has(n.parentId));
+        const prefix = `[frame ${oopIndex}] `;
+
+        function renderOopNode(node, depth) {
+          if (node.ignored) {
+            const children = (node.childIds || []).map(id => nodeMap.get(id)).filter(Boolean);
+            return children.map(c => renderOopNode(c, depth)).filter(Boolean).join("\n");
+          }
+          const role = node.role?.value;
+          if (!role || role === "none" || role === "GenericContainer" || role === "InlineTextBox") {
+            const children = (node.childIds || []).map(id => nodeMap.get(id)).filter(Boolean);
+            return children.map(c => renderOopNode(c, depth)).filter(Boolean).join("\n");
+          }
+          const ref = ++refCounter;
+          if (node.backendDOMNodeId) {
+            newRefMap.set(ref, node.backendDOMNodeId);
+            newRouting.set(ref, childSess); // route this uid to the child session
+          }
+          const indent = "  ".repeat(depth);
+          const name = node.name?.value || "";
+          const nameStr = name ? ` "${name.replace(/[\n\r"\\]/g, " ").trim().substring(0, 120)}"` : "";
+          const props = [];
+          if (node.properties) {
+            for (const p of node.properties) {
+              const val = p.value?.value;
+              if (val === undefined || val === null) continue;
+              switch (p.name) {
+                case "disabled": if (val) props.push("disabled"); break;
+                case "checked": if (val === "true" || val === true) props.push("checked"); else if (val === "mixed") props.push("mixed"); break;
+                case "expanded": props.push(val ? "expanded" : "collapsed"); break;
+                case "selected": if (val) props.push("selected"); break;
+                case "required": if (val) props.push("required"); break;
+                case "readonly": if (val) props.push("readonly"); break;
+                case "focused": if (val) props.push("focused"); break;
+                case "pressed": if (val === "true" || val === true) props.push("pressed"); break;
+                case "level": props.push("level=" + val); break;
+                case "valuetext": props.push("value=" + JSON.stringify(String(val).substring(0, 80))); break;
+                case "hasPopup": if (val && val !== "false") props.push("haspopup=" + val); break;
+                case "autocomplete": if (val && val !== "none") props.push("autocomplete=" + val); break;
+                case "modal": if (val) props.push("modal"); break;
+                case "multiselectable": if (val) props.push("multiselectable"); break;
+                case "orientation": if (val !== "none") props.push("orientation=" + val); break;
+              }
+            }
+          }
+          if (node.value?.value !== undefined && node.value.value !== "") {
+            const v = String(node.value.value).substring(0, 80);
+            if (!props.some(p => p.startsWith("value="))) props.push("value=" + JSON.stringify(v));
+          }
+          const propStr = props.length ? " [" + props.join(", ") + "]" : "";
+          let line = `${indent}${prefix}- ${role}${nameStr}${propStr} [ref=${ref}]`;
+          const children = (node.childIds || []).map(id => nodeMap.get(id)).filter(Boolean);
+          const childLines = children.map(c => renderOopNode(c, depth + 1)).filter(Boolean);
+          if (childLines.length > 0) return line + "\n" + childLines.join("\n");
+          return line;
+        }
+
+        for (const root of roots) {
+          const rendered = renderOopNode(root, 0);
+          if (rendered) allLines.push(rendered);
+        }
+        oopIndex++;
+      } catch (e) {
+        allLines.push(`  - [oop-frame error: ${e.message?.substring(0, 60)}]`);
+      }
+    }
+  }
+  refOopSessions.set(sessionId, newRouting);
 
   // Update ref map
   refMaps.set(sessionId, newRefMap);
@@ -1178,12 +1300,14 @@ async function checkActionability(sessionId, uid, selector) {
 
   // Check actionability via backendNodeId or selector
   let objectId;
+  let resolveSession = sessionId;
   if (uid !== undefined && uid !== null) {
     const map = refMaps.get(sessionId);
     const backendNodeId = map?.get(uid);
     if (backendNodeId) {
+      resolveSession = getResolveSession(sessionId, uid);
       try {
-        const { object } = await cdp("DOM.resolveNode", { backendNodeId }, sessionId);
+        const { object } = await cdp("DOM.resolveNode", { backendNodeId }, resolveSession);
         objectId = object?.objectId;
       } catch {}
     }
@@ -1206,7 +1330,7 @@ async function checkActionability(sessionId, uid, selector) {
       }`,
       objectId,
       returnByValue: true,
-    }, sessionId);
+    }, resolveSession);
     const v = checks.result?.value;
     if (v?.error) throw new Error(v.error);
   }
@@ -1305,6 +1429,50 @@ function modifierFlags(modifiers) {
 
 // ─── Element Resolution (stable backendNodeId refs) ─────────────────
 
+/** Determine which CDP session to use for a given uid (parent vs OOP child) */
+function getResolveSession(parentSessionId, uid) {
+  if (uid === undefined || uid === null) return parentSessionId;
+  const routing = refOopSessions.get(parentSessionId);
+  return routing?.get(uid) || parentSessionId;
+}
+
+/** Get the viewport offset of an OOP iframe in the parent page (for coordinate transformation) */
+async function getOopIframeOffset(parentSessionId, uid) {
+  const routing = refOopSessions.get(parentSessionId);
+  const childSessionId = routing?.get(uid);
+  if (!childSessionId) return null; // not an OOP iframe element
+
+  // Find the frameId (targetId) for this child session
+  const oopFrames = oopFrameSessions.get(parentSessionId);
+  if (!oopFrames) return { x: 0, y: 0 };
+
+  let frameId = null;
+  for (const [tid, info] of oopFrames) {
+    if (info.sessionId === childSessionId) {
+      frameId = tid;
+      break;
+    }
+  }
+  if (!frameId) return { x: 0, y: 0 };
+
+  try {
+    const { backendNodeId } = await cdp("DOM.getFrameOwner", { frameId }, parentSessionId);
+    const { object } = await cdp("DOM.resolveNode", { backendNodeId }, parentSessionId);
+    if (object?.objectId) {
+      const result = await cdp("Runtime.callFunctionOn", {
+        functionDeclaration: `function() {
+          const r = this.getBoundingClientRect();
+          return { x: r.x, y: r.y };
+        }`,
+        objectId: object.objectId,
+        returnByValue: true,
+      }, parentSessionId);
+      return result.result?.value || { x: 0, y: 0 };
+    }
+  } catch {}
+  return { x: 0, y: 0 };
+}
+
 /** Build a JS expression that finds an element by CSS selector, piercing shadow DOM */
 function elementFinderExpr(selector) {
   if (!selector) throw new Error("Provide a CSS 'selector' or take a snapshot and use 'uid' (ref number).");
@@ -1330,8 +1498,9 @@ async function resolveElement(sessionId, uid, selector) {
     const map = refMaps.get(sessionId);
     const backendNodeId = map?.get(uid);
     if (backendNodeId) {
+      const resolveSession = getResolveSession(sessionId, uid);
       try {
-        const { object } = await cdp("DOM.resolveNode", { backendNodeId }, sessionId);
+        const { object } = await cdp("DOM.resolveNode", { backendNodeId }, resolveSession);
         if (object?.objectId) {
           const result = await cdp("Runtime.callFunctionOn", {
             functionDeclaration: `function() {
@@ -1347,9 +1516,18 @@ async function resolveElement(sessionId, uid, selector) {
             }`,
             objectId: object.objectId,
             returnByValue: true,
-          }, sessionId);
+          }, resolveSession);
           if (!result.exceptionDetails && result.result.value) {
-            return result.result.value;
+            const val = result.result.value;
+            // For OOP iframe elements, transform coordinates to main viewport space
+            if (resolveSession !== sessionId) {
+              const offset = await getOopIframeOffset(sessionId, uid);
+              if (offset) {
+                val.x += offset.x;
+                val.y += offset.y;
+              }
+            }
+            return val;
           }
         }
       } catch {
@@ -1392,15 +1570,16 @@ async function resolveElementObjectId(sessionId, uid, selector) {
     const map = refMaps.get(sessionId);
     const backendNodeId = map?.get(uid);
     if (backendNodeId) {
+      const resolveSession = getResolveSession(sessionId, uid);
       try {
-        const { object } = await cdp("DOM.resolveNode", { backendNodeId }, sessionId);
+        const { object } = await cdp("DOM.resolveNode", { backendNodeId }, resolveSession);
         if (object?.objectId) {
           // Scroll into view
           await cdp("Runtime.callFunctionOn", {
             functionDeclaration: `function() { this.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }); }`,
             objectId: object.objectId,
-          }, sessionId);
-          return object.objectId;
+          }, resolveSession);
+          return { objectId: object.objectId, resolvedSession: resolveSession };
         }
       } catch {
         // backendNodeId stale — fall through
@@ -1422,7 +1601,7 @@ async function resolveElementObjectId(sessionId, uid, selector) {
     returnByValue: false,
   }, sessionId);
   if (result.exceptionDetails) throw new Error((result.exceptionDetails.exception?.description || "Element resolution failed") + " — take a new snapshot with page tool, action: snapshot.");
-  return result.result.objectId;
+  return { objectId: result.result.objectId, resolvedSession: sessionId };
 }
 
 // ─── Tool Definitions (9 tools) ─────────────────────────────────────
@@ -1503,7 +1682,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["goto", "back", "forward", "reload", "snapshot", "screenshot", "content", "set_content", "wait", "pdf", "dialog", "inject", "add_style", "bypass_csp"], description: "Page action." },
+        action: { type: "string", enum: ["goto", "back", "forward", "reload", "snapshot", "screenshot", "content", "set_content", "wait", "pdf", "dialog", "inject", "add_style", "bypass_csp", "frames"], description: "Page action." },
         tabId: { type: "string", description: "Tab ID." },
         url: { type: "string", description: "URL for goto." },
         waitUntil: { type: "string", enum: ["load", "domcontentloaded", "networkidle", "commit"], description: "When to consider navigation complete (default: load). Matches Playwright conventions." },
@@ -2159,6 +2338,55 @@ async function handlePageReload(args) {
   return ok("Page reloaded.");
 }
 
+async function handlePageFrames(args) {
+  const sess = await getTabSession(args.tabId);
+  const frames = [];
+
+  // Same-origin frames from Page.getFrameTree
+  try {
+    await ensureDomain(sess, "Page");
+    const { frameTree } = await cdp("Page.getFrameTree", {}, sess);
+    let idx = 0;
+    function collectFrames(tree, depth) {
+      frames.push({
+        index: idx++,
+        id: tree.frame.id,
+        url: tree.frame.url,
+        securityOrigin: tree.frame.securityOrigin || "",
+        type: depth === 0 ? "main" : "same-origin",
+        depth,
+      });
+      if (tree.childFrames) {
+        for (const child of tree.childFrames) collectFrames(child, depth + 1);
+      }
+    }
+    collectFrames(frameTree, 0);
+  } catch {}
+
+  // OOP (cross-origin) frames from auto-attached child sessions
+  const oopFrames = oopFrameSessions.get(sess);
+  if (oopFrames?.size > 0) {
+    let oopIdx = frames.length;
+    for (const [targetId, { sessionId: childSess, url }] of oopFrames) {
+      frames.push({
+        index: oopIdx++,
+        id: targetId,
+        url,
+        securityOrigin: "",
+        type: "cross-origin (OOP)",
+        depth: 1,
+        sessionId: childSess,
+      });
+    }
+  }
+
+  if (frames.length === 0) return ok("No frames found.");
+  const lines = frames.map(f =>
+    `[frame ${f.index}] ${f.type} | ${f.url.substring(0, 120)}${f.type === "cross-origin (OOP)" ? " (auto-attached)" : ""}`
+  );
+  return ok(`${frames.length} frame(s):\n\n${lines.join("\n")}`);
+}
+
 async function handlePageSnapshot(args) {
   const sess = await getTabSession(args.tabId);
   const snap = await buildSnapshot(sess);
@@ -2469,12 +2697,12 @@ async function handlePageContent(args) {
   }
   const prop = args.format === "html" ? "innerHTML" : "innerText";
   if (args.uid !== undefined || args.selector) {
-    const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
+    const { objectId, resolvedSession } = await resolveElementObjectId(sess, args.uid, args.selector);
     const result = await cdp("Runtime.callFunctionOn", {
       functionDeclaration: `function() { return this[${JSON.stringify(prop)}]; }`,
       objectId,
       returnByValue: true,
-    }, sess);
+    }, resolvedSession);
     return ok(result.result.value ?? "(empty)");
   }
   // Default: body
@@ -2659,12 +2887,13 @@ async function handleInteractClick(args) {
 
   // Resolve objectId for potential JS click fallback (web components / Shadow DOM)
   let objectId;
+  const clickResolveSession = getResolveSession(sess, args.uid);
   if (args.uid !== undefined && args.uid !== null) {
     const map = refMaps.get(sess);
     const backendNodeId = map?.get(args.uid);
     if (backendNodeId) {
       try {
-        const { object } = await cdp("DOM.resolveNode", { backendNodeId }, sess);
+        const { object } = await cdp("DOM.resolveNode", { backendNodeId }, clickResolveSession);
         objectId = object?.objectId;
       } catch {}
     }
@@ -2692,7 +2921,7 @@ async function handleInteractClick(args) {
         }`,
         objectId,
         returnByValue: true,
-      }, sess);
+      }, clickResolveSession);
       preState = check.result?.value;
     } catch {}
   }
@@ -2744,7 +2973,7 @@ async function handleInteractClick(args) {
           }`,
           objectId,
           returnByValue: true,
-        }, sess);
+        }, clickResolveSession);
         const postState = postCheck.result?.value;
         // If state didn't change, dispatch full pointer+mouse event sequence as fallback.
         // Many modern frameworks (React, GitHub Primer, etc.) listen for PointerEvents,
@@ -2762,7 +2991,7 @@ async function handleInteractClick(args) {
               this.dispatchEvent(new MouseEvent('click', opts));
             }`,
             objectId,
-          }, sess);
+          }, clickResolveSession);
           await sleep(200); // Let event handlers process
         }
       } catch {}
@@ -2804,7 +3033,7 @@ async function handleInteractType(args) {
   const retryTimeout = args.timeout || 5000;
   // Bundle actionability + object resolution in one retry block to avoid race conditions
   // (page re-render between the two calls would crash resolveElementObjectId)
-  const objectId = await withRetry(async () => {
+  const { objectId, resolvedSession } = await withRetry(async () => {
     await checkActionability(sess, args.uid, args.selector);
     return resolveElementObjectId(sess, args.uid, args.selector);
   }, { timeout: retryTimeout });
@@ -2821,7 +3050,7 @@ async function handleInteractType(args) {
     functionDeclaration: `function() { this.scrollIntoView({block:"center"}); this.focus(); ${clearCode} return {ok:true}; }`,
     objectId,
     returnByValue: true,
-  }, sess);
+  }, resolvedSession);
   if (focused.result.value?.error) return fail(focused.result.value.error);
 
   const { networkEvents } = await waitForCompletion(sess, async () => {
@@ -2908,7 +3137,7 @@ async function handleInteractFill(args) {
     for (const field of args.fields) {
       try {
         // Bundle actionability + object resolution in one retry block
-        const objectId = await withRetry(async () => {
+        const { objectId, resolvedSession: fieldSession } = await withRetry(async () => {
           await checkActionability(sess, field.uid, field.selector);
           return resolveElementObjectId(sess, field.uid, field.selector);
         }, { timeout: retryTimeout });
@@ -2949,7 +3178,7 @@ async function handleInteractFill(args) {
           }`,
           objectId,
           returnByValue: true,
-        }, sess);
+        }, fieldSession);
         results.push({ field: field.uid ?? field.selector, ...(r.result.value || { error: "eval failed" }) });
       } catch (e) {
         results.push({ field: field.uid ?? field.selector, error: e.message });
@@ -2967,7 +3196,7 @@ async function handleInteractSelect(args) {
   const sess = await getTabSession(args.tabId);
   const retryTimeout = args.timeout || 5000;
   // Bundle actionability + object resolution in one retry block to avoid race conditions
-  const objectId = await withRetry(async () => {
+  const { objectId, resolvedSession } = await withRetry(async () => {
     await checkActionability(sess, args.uid, args.selector);
     return resolveElementObjectId(sess, args.uid, args.selector);
   }, { timeout: retryTimeout });
@@ -3009,7 +3238,7 @@ async function handleInteractSelect(args) {
       }`,
       objectId,
       returnByValue: true,
-    }, sess);
+    }, resolvedSession);
     const v = result.result.value;
     if (v?.error) throw new Error(v.error);
 
@@ -3115,12 +3344,12 @@ async function handleInteractScroll(args) {
     const scrollX = args.x ?? 0;
     const scrollY = args.y ?? 0;
     if (args.uid !== undefined || args.selector) {
-      const objectId = await withRetry(() => resolveElementObjectId(sess, args.uid, args.selector), { timeout: retryTimeout });
+      const { objectId, resolvedSession } = await withRetry(() => resolveElementObjectId(sess, args.uid, args.selector), { timeout: retryTimeout });
       await cdp("Runtime.callFunctionOn", {
         functionDeclaration: `function() { this.scrollTo({left:${scrollX},top:${scrollY},behavior:'smooth'}); }`,
         objectId,
         returnByValue: true,
-      }, sess);
+      }, resolvedSession);
     } else {
       await cdp("Runtime.evaluate", {
         expression: `window.scrollTo({left:${scrollX},top:${scrollY},behavior:'smooth'})`,
@@ -3141,12 +3370,12 @@ async function handleInteractScroll(args) {
   }
 
   if (args.uid !== undefined || args.selector) {
-    const objectId = await withRetry(() => resolveElementObjectId(sess, args.uid, args.selector), { timeout: retryTimeout });
+    const { objectId, resolvedSession } = await withRetry(() => resolveElementObjectId(sess, args.uid, args.selector), { timeout: retryTimeout });
     await cdp("Runtime.callFunctionOn", {
       functionDeclaration: `function() { this.scrollBy({left:${deltaX},top:${deltaY},behavior:'smooth'}); }`,
       objectId,
       returnByValue: true,
-    }, sess);
+    }, resolvedSession);
   } else {
     await cdp("Runtime.evaluate", {
       expression: `window.scrollBy({left:${deltaX},top:${deltaY},behavior:'smooth'})`,
@@ -3195,11 +3424,11 @@ async function handleInteractUpload(args) {
   }
 
   // Element specified — use direct file input approach
-  const objectId = await withRetry(() => resolveElementObjectId(sess, args.uid, args.selector), { timeout: retryTimeout });
+  const { objectId, resolvedSession } = await withRetry(() => resolveElementObjectId(sess, args.uid, args.selector), { timeout: retryTimeout });
 
   // Describe node to get backendNodeId for setFileInputFiles
-  const { node } = await cdp("DOM.describeNode", { objectId }, sess);
-  await cdp("DOM.setFileInputFiles", { files: args.files, backendNodeId: node.backendNodeId }, sess);
+  const { node } = await cdp("DOM.describeNode", { objectId }, resolvedSession);
+  await cdp("DOM.setFileInputFiles", { files: args.files, backendNodeId: node.backendNodeId }, resolvedSession);
 
   return ok(`Uploaded ${args.files.length} file(s): ${args.files.map(f => f.split(/[/\\]/).pop()).join(", ")}`);
 }
@@ -3207,7 +3436,7 @@ async function handleInteractUpload(args) {
 async function handleInteractFocus(args) {
   const sess = await getTabSession(args.tabId);
   const retryTimeout = args.timeout || 5000;
-  const objectId = await withRetry(() => resolveElementObjectId(sess, args.uid, args.selector), { timeout: retryTimeout });
+  const { objectId, resolvedSession } = await withRetry(() => resolveElementObjectId(sess, args.uid, args.selector), { timeout: retryTimeout });
   const result = await cdp("Runtime.callFunctionOn", {
     functionDeclaration: `function() {
       this.scrollIntoView({ block: "center" });
@@ -3216,7 +3445,7 @@ async function handleInteractFocus(args) {
     }`,
     objectId,
     returnByValue: true,
-  }, sess);
+  }, resolvedSession);
   const v = result.result.value;
   if (v?.error) return fail(v.error);
   return ok(`Focused <${v.tag}> "${v.label}"`);
@@ -3227,7 +3456,7 @@ async function handleInteractCheck(args) {
   const sess = await getTabSession(args.tabId);
   const retryTimeout = args.timeout || 5000;
   // Bundle actionability + object resolution in one retry block to avoid race conditions
-  const objectId = await withRetry(async () => {
+  const { objectId, resolvedSession } = await withRetry(async () => {
     await checkActionability(sess, args.uid, args.selector);
     return resolveElementObjectId(sess, args.uid, args.selector);
   }, { timeout: retryTimeout });
@@ -3245,7 +3474,7 @@ async function handleInteractCheck(args) {
       }`,
       objectId,
       returnByValue: true,
-    }, sess);
+    }, resolvedSession);
     const v = result.result.value;
     if (v?.error) throw new Error(v.error);
     return v;
@@ -3325,7 +3554,7 @@ async function handleExecuteScript(args) {
 async function handleExecuteCall(args) {
   if (!args.function) return fail("Provide 'function' declaration, e.g. '(el) => el.textContent'.");
   const sess = await getTabSession(args.tabId);
-  const objectId = await resolveElementObjectId(sess, args.uid, args.selector);
+  const { objectId, resolvedSession } = await resolveElementObjectId(sess, args.uid, args.selector);
 
   const result = await cdp("Runtime.callFunctionOn", {
     functionDeclaration: args.function,
@@ -3333,7 +3562,7 @@ async function handleExecuteCall(args) {
     arguments: [{ objectId }],
     returnByValue: true,
     awaitPromise: true,
-  }, sess);
+  }, resolvedSession);
 
   if (result.exceptionDetails) {
     return fail(result.exceptionDetails.exception?.description || result.exceptionDetails.text || "Call error");
@@ -4547,6 +4776,7 @@ const HANDLERS = {
     add_style: handlePageAddStyle,
     bypass_csp: handlePageBypassCsp,
     set_content: handlePageSetContent,
+    frames: handlePageFrames,
   },
   interact: {
     click: handleInteractClick,

@@ -2,6 +2,16 @@
 
 All notable changes to CDP Browser MCP Server will be documented in this file.
 
+## [4.12.0] — 2026-03-16
+
+### Added — Cross-Origin (OOP) Iframe Support
+- **`Target.setAutoAttach` on page sessions** — every new tab session now calls `Target.setAutoAttach({ autoAttach: true, flatten: true })` to auto-discover cross-origin (Out-Of-Process) iframe targets that Chrome's Site Isolation runs in separate OS processes
+- **OOP iframe snapshot content** — `page.snapshot` now captures accessibility tree content from cross-origin iframes (shown with `[frame N]` prefixes), making previously invisible content from sites like SharePoint Word/Excel Online, OAuth consent screens, and embedded payment forms fully visible
+- **OOP iframe element interaction** — `interact` tool actions (click, type, fill, select, scroll, focus, check, upload, tap) now resolve `uid` refs from cross-origin iframe snapshots to the correct child CDP session, with automatic coordinate transformation for Input events
+- **OOP iframe JS execution** — `execute.call` and `page.content` with `uid` now route `Runtime.callFunctionOn` to the correct cross-origin iframe session
+- **`page.frames` action** — new action lists all frames in a page including same-origin frames from `Page.getFrameTree` and cross-origin OOP frames from auto-attached child sessions
+- **`Target.attachedToTarget` / `Target.detachedFromTarget` event handling** — OOP iframe child sessions are tracked and cleaned up automatically on navigation or tab detach
+
 ## [4.11.1] — 2026-03-12
 
 ### Fixed
