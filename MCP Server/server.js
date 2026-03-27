@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * CDP Browser Automation — MCP Server  v4.12.0
+ * CDP Browser Automation — MCP Server  v4.12.1
  *
  * 11 tools with 87+ sub-actions for full browser automation.
  * Features: stable element refs (backendNodeId), auto-waiting, incremental snapshots,
@@ -834,6 +834,78 @@ async function getTabs() {
   return targetInfos || [];
 }
 
+/**
+ * Resolve a profile name/email/directory to its browserContextId.
+ * Cross-references Local State profile names with live tab browserContextId values.
+ * @param {string} profileQuery - profile name, email, or directory (e.g. "Work", "mansha@gmail.com", "Profile 7")
+ * @returns {Promise<{browserContextId: string, profileName: string}|null>}
+ */
+async function resolveProfileContext(profileQuery) {
+  if (!profileQuery) return null;
+  const q = profileQuery.toLowerCase();
+
+  // Get live tabs to see which browserContextIds exist
+  const tabs = await getTabs();
+  const contextIds = new Set(tabs.map(t => t.browserContextId).filter(Boolean));
+  if (contextIds.size === 0) return null;
+
+  // Read Local State for profile metadata
+  const udPath = activeConnectionInfo?.userDataDir || lastResolvedUserDataDir;
+  if (!udPath) return null;
+  let profileMap = []; // [{ directory, name, email, browserContextId? }]
+  try {
+    const localState = JSON.parse(readFileSync(join(udPath, "Local State"), "utf8"));
+    const cache = localState?.profile?.info_cache || {};
+    profileMap = Object.entries(cache).map(([dir, info]) => ({
+      directory: dir,
+      name: info.name || dir,
+      gaiaName: info.gaia_name || "",
+      email: info.user_name || "",
+    }));
+  } catch { return null; }
+
+  // Chrome doesn't directly map profile directories to browserContextIds,
+  // but each profile gets a unique context. If we have N profiles and N contexts,
+  // we can match by ordering (Chrome assigns contexts in profile creation order).
+  // More reliably: if a profile has ANY open tab, we can match it.
+  // Strategy: group tabs by browserContextId, then match profiles by finding
+  // a context whose tabs' URLs/titles align with the profile.
+  // For exact matching: accept browserContextId directly as profileQuery.
+  
+  // Direct browserContextId match
+  if (contextIds.has(profileQuery)) {
+    const profile = profileMap.find(p => p.directory.toLowerCase() === q || p.name.toLowerCase() === q || p.email.toLowerCase() === q);
+    return { browserContextId: profileQuery, profileName: profile?.name || profileQuery };
+  }
+
+  // Match by profile name, email, or directory
+  const matchedProfile = profileMap.find(p =>
+    p.name.toLowerCase() === q ||
+    p.email.toLowerCase() === q ||
+    p.directory.toLowerCase() === q ||
+    p.gaiaName.toLowerCase() === q
+  );
+  if (!matchedProfile) return null;
+
+  // If there's only one context, it must be this profile
+  if (contextIds.size === 1) {
+    const [ctxId] = contextIds;
+    return { browserContextId: ctxId, profileName: matchedProfile.name };
+  }
+
+  // Multiple contexts — try to find which one belongs to this profile.
+  // Group tabs by context, match profile index to context index as a heuristic.
+  // Chrome typically assigns browserContextIds in profile creation order.
+  const profileIndex = profileMap.indexOf(matchedProfile);
+  const sortedContexts = [...contextIds].sort(); // consistent ordering
+  if (profileIndex >= 0 && profileIndex < sortedContexts.length) {
+    return { browserContextId: sortedContexts[profileIndex], profileName: matchedProfile.name };
+  }
+
+  // Fallback: return first available context with a warning
+  return null;
+}
+
 // ─── Accessibility Tree / Snapshot ──────────────────────────────────
 
 function collectFrameIds(frameTree) {
@@ -1616,7 +1688,7 @@ const TOOLS = [
       "Operations:",
       "- list: List all open browser tabs with their IDs, URLs, and titles",
       "- find: Search tabs by title or URL substring (requires: query)",
-      "- new: Open a new tab (optional: url — defaults to about:blank, activate — bring to foreground, default: false)",
+      "- new: Open a new tab (optional: url — defaults to about:blank, activate — bring to foreground, default: false, profile — create in specific Chrome profile by name/email/directory)",
       "- close: Close a specific tab (requires: tabId)",
       "- activate: Bring a tab to the foreground (requires: tabId)",
       "- info: Get detailed info about a tab including URL, title, and connection status (requires: tabId)",
@@ -1635,6 +1707,7 @@ const TOOLS = [
         tabId: { type: "string", description: "Tab ID for close/activate/info." },
         url: { type: "string", description: "URL for 'new' action." },
         activate: { type: "boolean", description: "Bring new tab to foreground (default: false — opens in background without stealing focus)." },
+        profile: { type: "string", description: "Create tab in a specific Chrome profile (by name, email, or directory e.g. 'Work', 'mansha@gmail.com', 'Profile 7'). Requires the profile to have at least one open tab for context resolution." },
         showAll: { type: "boolean", description: "Show all browser tabs, not just session-owned ones (for list action)." },
         sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
         cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs, 'detach' keeps them, 'none' skips cleanup. Sticky per session." },
@@ -2233,7 +2306,14 @@ async function handleTabsFind(args) {
 async function handleTabsNew(args) {
   const url = args.url || "about:blank";
   const background = args.activate === false || args.activate === undefined; // default: open in background
-  const { targetId } = await cdp("Target.createTarget", { url, background });
+  const createParams = { url, background };
+  // Profile-aware tab creation: resolve profile name to browserContextId
+  if (args.profile) {
+    const resolved = await resolveProfileContext(args.profile);
+    if (!resolved) return fail(`Profile "${args.profile}" not found or has no open tabs. Use browser.active to see available profiles and their contexts.`);
+    createParams.browserContextId = resolved.browserContextId;
+  }
+  const { targetId } = await cdp("Target.createTarget", createParams);
   // Register ownership immediately so tabs.list shows it right away
   if (args._agentSession) {
     args._agentSession.tabIds.add(targetId);
@@ -3750,7 +3830,7 @@ async function handleObserveHar(args) {
   const har = {
     log: {
       version: "1.2",
-      creator: { name: "CDP Browser MCP Server", version: "4.11.0" },
+      creator: { name: "CDP Browser MCP Server", version: "4.12.1" },
       entries,
     },
   };
@@ -4540,7 +4620,7 @@ async function handleBrowserActive() {
     } catch { /* ok */ }
   }
 
-  // Show tab count per browserContextId (profile grouping)
+  // Show tab count per browserContextId (profile grouping) with profile name resolution
   try {
     const { targetInfos } = await cdp("Target.getTargets", { filter: [{ type: "page" }] });
     if (targetInfos?.length) {
@@ -4549,9 +4629,23 @@ async function handleBrowserActive() {
         const ctx = t.browserContextId || "default";
         byContext[ctx] = (byContext[ctx] || 0) + 1;
       }
-      text += `\nTabs by profile context:\n`;
+      // Try to map browserContextIds to profile names
+      let profileNames = {};
+      if (info.userDataDir) {
+        try {
+          const ls = JSON.parse(readFileSync(join(info.userDataDir, "Local State"), "utf8"));
+          const cache = ls?.profile?.info_cache || {};
+          const profiles = Object.entries(cache).map(([dir, p]) => ({ dir, name: p.name || dir, email: p.user_name || "" }));
+          const sortedContexts = Object.keys(byContext).sort();
+          for (let i = 0; i < Math.min(profiles.length, sortedContexts.length); i++) {
+            profileNames[sortedContexts[i]] = profiles[i].name + (profiles[i].email ? ` (${profiles[i].email})` : "");
+          }
+        } catch { /* ok */ }
+      }
+      text += `\nTabs by profile:\n`;
       for (const [ctx, count] of Object.entries(byContext)) {
-        text += `  ${ctx.substring(0, 12)}… — ${count} tab(s)\n`;
+        const pName = profileNames[ctx] || ctx.substring(0, 12) + "…";
+        text += `  ${pName} — ${count} tab(s) [context: ${ctx.substring(0, 12)}…]\n`;
       }
     }
   } catch { /* ok */ }
@@ -5061,7 +5155,7 @@ function appendConsoleErrors(result, tabId) {
 // ─── MCP Server Setup ───────────────────────────────────────────────
 
 const server = new Server(
-  { name: "cdp-browser", version: "4.9.0" },
+  { name: "cdp-browser", version: "4.12.1" },
   { capabilities: { tools: {} } }
 );
 

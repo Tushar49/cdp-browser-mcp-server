@@ -7,9 +7,9 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-4.11.1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-4.12.1-blue" alt="Version">
   <img src="https://img.shields.io/badge/tools-11-green" alt="Tools">
-  <img src="https://img.shields.io/badge/sub--actions-86+-green" alt="Actions">
+  <img src="https://img.shields.io/badge/sub--actions-87+-green" alt="Actions">
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen" alt="Node">
   <img src="https://img.shields.io/badge/license-MIT-yellow" alt="License">
 </p>
@@ -38,7 +38,7 @@ CDP Browser MCP Server connects to your **already-running** browser over a WebSo
 | Browser Use needs Python + LLM key | Heavy framework, double LLM cost |
 | BrowserTools MCP is read-only | Can observe but can't automate |
 
-**This server**: connects to Chrome on `localhost:9222`, uses the real browser state, and gives you **86+ automation actions** across 11 tools — all from a single `server.js` file with 2 dependencies. Geolocation spoofing automatically grants browser permissions so permission-based sites just work.
+**This server**: connects to Chrome on `localhost:9222`, uses the real browser state, and gives you **87+ automation actions** across 11 tools — all from a single `server.js` file with 2 dependencies. Geolocation spoofing automatically grants browser permissions so permission-based sites just work.
 
 ---
 
@@ -201,7 +201,7 @@ The server communicates over stdio using the MCP protocol. Any MCP-compatible cl
 |--------|-------------|----------|----------|
 | `list` | List all open tabs with IDs, URLs, titles | — | `showAll` |
 | `find` | Search tabs by title or URL substring | `query` | — |
-| `new` | Open a new tab (background by default) | — | `url`, `activate` |
+| `new` | Open a new tab (background by default) | — | `url`, `activate`, `profile` |
 | `close` | Close a tab | `tabId` | — |
 | `activate` | Bring tab to foreground | `tabId` | — |
 | `info` | Get tab details + connection status | `tabId` | — |
@@ -457,6 +457,7 @@ The `browser` tool detects all running Chrome instances (Chrome, Beta, Canary, C
 - **`browser.profiles`** — list all instances with ports, profiles, and connection status
 - **`browser.connect`** — switch to a different Chrome instance by name, port, or path
 - **`browser.active`** — show current instance info, profiles, health, tabs per profile context
+- **`tabs.new` with `profile`** — create tabs in a specific profile by name, email, or directory (e.g. `profile: "Work"`)
 - **`tabs.info`** shows `browserContextId` for profile identification
 - Set `CDP_PROFILE` env var to auto-connect at startup
 
@@ -619,7 +620,7 @@ A: No. It connects directly to Chrome via CDP WebSocket. Only dependencies are `
 A: Yes. Each agent process is automatically assigned an isolated session — no configuration needed. Sessions auto-expire after 5 minutes. Pass a custom `sessionId` to reconnect to a previous session.
 
 **Q: Does it work with Chrome profiles / corporate Chrome?**  
-A: Yes. The `browser` tool detects all running Chrome instances and their profiles. Use `browser.profiles` to see available instances and `browser.connect` to switch between them. All Chrome profiles within one instance share a single debug port — each profile's tabs are distinguishable via `browserContextId` in `tabs.info`.
+A: Yes. The `browser` tool detects all running Chrome instances and their profiles. Use `browser.profiles` to see available instances and `browser.connect` to switch between them. Use `tabs.new` with the `profile` parameter to create tabs in a specific profile (e.g. `profile: "Work"` or `profile: "mansha@gmail.com"`). All Chrome profiles within one instance share a single debug port — each profile's tabs are distinguishable via `browserContextId` in `tabs.info`.
 
 **Q: What about iframes and Shadow DOM?**  
 A: The snapshot uses `Accessibility.getFullAXTree()` which captures the full accessibility tree including shadow DOM and iframes. Element refs (uid) work across frames — use `uid` from snapshots to interact with iframe elements. CSS selectors only find top-level elements.

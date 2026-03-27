@@ -2,6 +2,19 @@
 
 All notable changes to CDP Browser MCP Server will be documented in this file.
 
+## [4.12.1] — 2026-03-27
+
+### Added — Profile-Aware Tab Creation
+- **`tabs.new` `profile` parameter** — create new tabs in a specific Chrome profile by name, email, or directory (e.g. `profile: "Work"`, `profile: "mansha@gmail.com"`, `profile: "Profile 7"`). Resolves profile to `browserContextId` via cross-referencing `Local State` metadata with live tab contexts, then passes it to `Target.createTarget`
+- **`resolveProfileContext()` helper** — new function maps profile name/email/directory to `browserContextId` by reading `Local State` profile cache and matching against live tab `browserContextId` values
+
+### Improved
+- **`browser.active` profile names** — tabs-by-profile section now shows human-readable profile names (with email) instead of truncated browserContextId hashes, by cross-referencing `Local State` profile cache
+
+### Fixed
+- **HAR creator version** — corrected stale `"4.11.0"` hardcoded version in HAR export to `"4.12.1"`
+- **MCP server registration version** — corrected stale `"4.9.0"` to `"4.12.1"` in `Server` constructor
+
 ## [4.12.0] — 2026-03-16
 
 ### Added — Cross-Origin (OOP) Iframe Support
