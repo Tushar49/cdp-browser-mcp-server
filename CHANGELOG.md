@@ -2,6 +2,18 @@
 
 All notable changes to CDP Browser MCP Server will be documented in this file.
 
+## [4.13.0] — 2026-03-29
+
+### Added — Popup-Aware File Upload
+- **Multi-target upload detection** — `interact.upload` (without uid/selector) now monitors BOTH the current page AND any popup windows that open for file chooser dialogs or `<input type="file">` elements. Handles Google Drive Picker, Dropbox file chooser, and other popup-based upload workflows automatically
+- **`findAndSetFileInput()` helper** — searches page DOM (including shadow DOMs) for file inputs and sets files directly via `DOM.setFileInputFiles`, bypassing the need for a native file dialog
+- **Popup auto-attach** — when a popup/tab opens during an upload call, the server automatically attaches a lightweight CDP session, enables file chooser interception, and polls for file input elements as the popup loads
+- **Improved error messages** — upload timeout errors now include actionable tips for popup-based upload scenarios
+
+### Improved
+- **Upload timeout** — default timeout for no-uid/no-selector uploads increased from 10s to 30s to accommodate popup loading time
+- **Upload description** — tool schema description updated to document popup-aware behavior
+
 ## [4.12.1] — 2026-03-27
 
 ### Added — Profile-Aware Tab Creation

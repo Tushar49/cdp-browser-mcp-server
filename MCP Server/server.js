@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * CDP Browser Automation — MCP Server  v4.12.1
+ * CDP Browser Automation — MCP Server  v4.13.0
  *
  * 11 tools with 87+ sub-actions for full browser automation.
  * Features: stable element refs (backendNodeId), auto-waiting, incremental snapshots,
@@ -1806,7 +1806,7 @@ const TOOLS = [
       "- press: Press a keyboard key with optional modifiers (requires: tabId, key; optional: modifiers[Control|Shift|Alt|Meta])",
       "- drag: Drag an element to another element (requires: tabId, sourceUid or sourceSelector, targetUid or targetSelector; optional: timeout)",
       "- scroll: Scroll the page or a specific element (requires: tabId; optional: direction[up|down|left|right], amount[default:400px], x, y for absolute scroll, uid or selector for scrolling within an element, timeout)",
-      "- upload: Upload files to a file input or intercept a file chooser dialog. With uid/selector: sets files directly on a <input type=file>. Without uid/selector: waits for the next file chooser dialog (click the upload button first) (requires: tabId, files — array of absolute file paths; optional: uid or selector, timeout)",
+      "- upload: Upload files to a file input or intercept a file chooser dialog. With uid/selector: sets files directly on a <input type=file>. Without uid/selector: monitors for file chooser dialogs on BOTH the current page AND any popup windows that open (handles Google Drive Picker, Dropbox chooser, etc.) — also auto-detects hidden <input type=file> elements (requires: tabId, files — array of absolute file paths; optional: uid or selector, timeout — default 30s for popup detection)",
       "- focus: Focus an element and scroll it into view (requires: tabId, uid or selector; optional: timeout)",
       "- check: Set a checkbox to checked or unchecked (requires: tabId, checked[true|false], uid or selector; optional: timeout)",
       "- tap: Tap an element using touch events (requires: tabId, uid or selector; optional: timeout)",
@@ -3465,42 +3465,187 @@ async function handleInteractScroll(args) {
   return ok(`Scrolled ${dir} by ${amount}px`);
 }
 
+/**
+ * Search for <input type="file"> in a page (including shadow DOMs) and set files directly.
+ * Returns true if files were successfully set, false if no file input found.
+ * @param {string} sessId - CDP session ID
+ * @param {string[]} files - Array of absolute file paths
+ */
+async function findAndSetFileInput(sessId, files) {
+  try {
+    const inputObj = await cdp("Runtime.evaluate", {
+      expression: `(() => {
+        function find(root) {
+          const el = root.querySelector('input[type="file"]');
+          if (el) return el;
+          for (const s of root.querySelectorAll('*')) {
+            if (s.shadowRoot) { const f = find(s.shadowRoot); if (f) return f; }
+          }
+          return null;
+        }
+        return find(document);
+      })()`,
+      returnByValue: false,
+    }, sessId, 3000);
+
+    if (!inputObj.result?.objectId) return false;
+
+    const { node } = await cdp("DOM.describeNode", { objectId: inputObj.result.objectId }, sessId);
+    await cdp("DOM.setFileInputFiles", { files, backendNodeId: node.backendNodeId }, sessId);
+
+    // Dispatch change+input events as safety measure (some frameworks listen directly)
+    await cdp("Runtime.callFunctionOn", {
+      functionDeclaration: `function() {
+        this.dispatchEvent(new Event('change', { bubbles: true }));
+        this.dispatchEvent(new Event('input', { bubbles: true }));
+      }`,
+      objectId: inputObj.result.objectId,
+    }, sessId).catch(() => {});
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function handleInteractUpload(args) {
   if (!args.files?.length) return fail("Provide 'files' array with absolute file paths.");
   const sess = await getTabSession(args.tabId);
   const retryTimeout = args.timeout || 5000;
 
-  // If no element specified, intercept the next file chooser dialog
+  // No element specified — smart multi-target file upload
+  // Monitors main page AND popup windows for file chooser dialogs or file inputs.
+  // Handles popup-based upload flows (Google Drive Picker, Dropbox chooser, etc.)
   if (!args.uid && !args.selector) {
-    // Register handler BEFORE enabling interception to avoid race condition
-    let fileChooserHandler;
-    const chooserPromise = new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error("No file chooser dialog appeared within 10s. Click the upload button first, then call upload."));
-      }, 10000);
-      fileChooserHandler = (sid, method, params) => {
-        if (sid === sess && method === "Page.fileChooserOpened") {
-          clearTimeout(timeout);
-          resolve(params);
-        }
-      };
-      const pending = pendingFileChoosers.get(sess) || [];
-      pending.push(fileChooserHandler);
-      pendingFileChoosers.set(sess, pending);
+    const uploadTimeout = args.timeout || 30000;
+    const managedSessions = new Map(); // cdpSessionId → { targetId, isPopup }
+    const popupSessionIds = []; // popup CDP sessions we attached to (need cleanup)
+    let done = false;
+    let masterResolve, masterReject;
+
+    const masterPromise = new Promise((resolve, reject) => {
+      masterResolve = resolve;
+      masterReject = reject;
     });
-    // Enable interception after handler is registered
-    await cdp("Page.setInterceptFileChooserDialog", { enabled: true }, sess);
-    try {
-      await chooserPromise;
-      // Page.fileChooserOpened provides { frameId, mode } — use Page.handleFileChooser to accept
-      await cdp("Page.handleFileChooser", { action: "accept", files: args.files }, sess);
-    } finally {
-      // Clean up handler
-      const pending = pendingFileChoosers.get(sess) || [];
-      pendingFileChoosers.set(sess, pending.filter(h => h !== fileChooserHandler));
-      try { await cdp("Page.setInterceptFileChooserDialog", { enabled: false }, sess); } catch { /* ok */ }
+
+    const masterTimer = setTimeout(() => {
+      if (!done) {
+        done = true;
+        masterReject(new Error(
+          `No file input or file chooser dialog found within ${uploadTimeout / 1000}s.\n` +
+          "If a popup window opened (e.g. Google Drive Picker):\n" +
+          "• Use tabs.list to find the popup window\n" +
+          "• Snapshot the popup to find its file input or upload button\n" +
+          "• Use interact.upload with uid/selector targeting the file input in the popup"
+        ));
+      }
+    }, uploadTimeout);
+
+    function succeed(result) {
+      if (!done) {
+        done = true;
+        clearTimeout(masterTimer);
+        masterResolve(result);
+      }
     }
-    return ok(`Uploaded ${args.files.length} file(s) via file chooser: ${args.files.map(f => f.split(/[/\\]/).pop()).join(", ")}`);
+
+    // Universal file chooser handler — fires for ANY monitored session
+    const fileChooserHandler = (sid, method, params) => {
+      if (method === "Page.fileChooserOpened" && managedSessions.has(sid) && !done) {
+        succeed({ sessionId: sid, via: "fileChooser" });
+      }
+    };
+
+    // Add file chooser monitoring to a CDP session
+    async function addMonitoring(sessId, targetId, isPopup) {
+      if (managedSessions.has(sessId) || done) return;
+      managedSessions.set(sessId, { targetId, isPopup });
+      const pending = pendingFileChoosers.get(sessId) || [];
+      pending.push(fileChooserHandler);
+      pendingFileChoosers.set(sessId, pending);
+      try { await cdp("Page.setInterceptFileChooserDialog", { enabled: true }, sessId); } catch { /* ok */ }
+    }
+
+    // 1. Monitor main page session for file chooser
+    await addMonitoring(sess, args.tabId, false);
+
+    // 2. Quick check: is there already a <input type="file"> on this page?
+    if (await findAndSetFileInput(sess, args.files)) {
+      succeed({ sessionId: sess, via: "directInput" });
+    }
+
+    // 3. Record current tabs to detect new popups
+    const seenTargets = new Set((await getTabs()).map(t => t.targetId));
+
+    // 4. Poll for new popup windows + scan them for file inputs
+    const pollTimer = setInterval(async () => {
+      if (done) return;
+      try {
+        const tabs = await getTabs();
+        for (const tab of tabs) {
+          if (seenTargets.has(tab.targetId) || done) continue;
+          seenTargets.add(tab.targetId);
+
+          // New popup/tab — attach lightweight CDP session and monitor
+          try {
+            const { sessionId: psid } = await cdp("Target.attachToTarget", {
+              targetId: tab.targetId, flatten: true
+            });
+            popupSessionIds.push(psid);
+            await cdp("Runtime.enable", {}, psid, 5000).catch(() => {});
+            await cdp("Page.enable", {}, psid, 5000).catch(() => {});
+            await addMonitoring(psid, tab.targetId, true);
+          } catch { /* failed to attach — popup may have closed */ }
+        }
+
+        // Retry file input search on all popup sessions (content may have loaded)
+        for (const psid of popupSessionIds) {
+          if (done) break;
+          if (await findAndSetFileInput(psid, args.files)) {
+            succeed({ sessionId: psid, via: "popupDirectInput" });
+          }
+        }
+      } catch { /* ignore polling errors */ }
+    }, 1000);
+
+    try {
+      const result = await masterPromise;
+
+      if (result.via === "fileChooser") {
+        await cdp("Page.handleFileChooser", { action: "accept", files: args.files }, result.sessionId);
+        const where = managedSessions.get(result.sessionId)?.isPopup ? " (from popup window)" : "";
+        return ok(`Uploaded ${args.files.length} file(s) via file chooser${where}: ${args.files.map(f => f.split(/[/\\]/).pop()).join(", ")}`);
+      }
+
+      if (result.via === "popupDirectInput") {
+        await sleep(1000); // let the popup process the files (e.g. Google Drive upload)
+        return ok(`Uploaded ${args.files.length} file(s) via popup file input: ${args.files.map(f => f.split(/[/\\]/).pop()).join(", ")}`);
+      }
+
+      // directInput on main page
+      return ok(`Uploaded ${args.files.length} file(s) via file input: ${args.files.map(f => f.split(/[/\\]/).pop()).join(", ")}`);
+    } catch (err) {
+      return fail(err.message);
+    } finally {
+      clearInterval(pollTimer);
+      clearTimeout(masterTimer);
+
+      // Clean up file chooser handlers
+      for (const [sid] of managedSessions) {
+        const pending = pendingFileChoosers.get(sid) || [];
+        pendingFileChoosers.set(sid, pending.filter(h => h !== fileChooserHandler));
+        try { await cdp("Page.setInterceptFileChooserDialog", { enabled: false }, sid); } catch { /* ok */ }
+      }
+
+      // Detach from popup sessions and clean up their event data
+      for (const psid of popupSessionIds) {
+        try { await cdp("Target.detachFromTarget", { sessionId: psid }); } catch { /* ok */ }
+        consoleLogs.delete(psid);
+        networkReqs.delete(psid);
+        pendingDialogs.delete(psid);
+        pendingFileChoosers.delete(psid);
+      }
+    }
   }
 
   // Element specified — use direct file input approach
@@ -3830,7 +3975,7 @@ async function handleObserveHar(args) {
   const har = {
     log: {
       version: "1.2",
-      creator: { name: "CDP Browser MCP Server", version: "4.12.1" },
+      creator: { name: "CDP Browser MCP Server", version: "4.13.0" },
       entries,
     },
   };
@@ -5155,7 +5300,7 @@ function appendConsoleErrors(result, tabId) {
 // ─── MCP Server Setup ───────────────────────────────────────────────
 
 const server = new Server(
-  { name: "cdp-browser", version: "4.12.1" },
+  { name: "cdp-browser", version: "4.13.0" },
   { capabilities: { tools: {} } }
 );
 

@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-4.12.1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-4.13.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/tools-11-green" alt="Tools">
   <img src="https://img.shields.io/badge/sub--actions-87+-green" alt="Actions">
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen" alt="Node">
@@ -237,7 +237,7 @@ The server communicates over stdio using the MCP protocol. Any MCP-compatible cl
 | `press` | Press keyboard key | `tabId`, `key` | `modifiers` |
 | `drag` | Drag element to target | `tabId`, source + target | `timeout`, `humanMode` |
 | `scroll` | Scroll page or element | `tabId` | `direction`, `amount`, `x`, `y`, `uid`, `timeout` |
-| `upload` | Upload files to file input or intercept file chooser dialog | `tabId`, `files[]` | `uid`, `selector`, `timeout` |
+| `upload` | Upload files to file input, intercept file chooser, or auto-detect popup file inputs (Google Picker, etc.) | `tabId`, `files[]` | `uid`, `selector`, `timeout` |
 | `focus` | Focus element + scroll into view | `tabId`, `uid` or `selector` | `timeout` |
 | `check` | Toggle checkbox | `tabId`, `checked`, `uid` or `selector` | `timeout` |
 | `tap` | Tap element using touch events | `tabId`, `uid` or `selector` | `timeout` |
