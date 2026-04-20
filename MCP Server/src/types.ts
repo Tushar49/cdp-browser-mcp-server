@@ -6,6 +6,9 @@
  * accessibility tree nodes, and tool registration.
  */
 
+import type { CDPClient } from './connection/cdp-client.js';
+import type { HealthMonitor } from './connection/health-monitor.js';
+
 // ─── Cleanup Strategy ───────────────────────────────────────────────
 
 /** How tabs are handled when an agent session expires. */
@@ -60,6 +63,8 @@ export interface ToolResultContent {
 export interface ToolResult {
   content: ToolResultContent[];
   isError?: boolean;
+  /** Index signature for MCP SDK compatibility. */
+  [key: string]: unknown;
 }
 
 // ─── CDP Protocol Messages ──────────────────────────────────────────
@@ -163,8 +168,14 @@ export interface ToolDefinition {
 export interface ServerContext {
   config: ServerConfig;
 
-  /** Send a CDP command and await its response. */
-  sendCommand: (method: string, params?: Record<string, unknown>, sessionId?: string) => Promise<CDPResponse>;
+  /** The active CDP WebSocket client. */
+  cdpClient: CDPClient;
+
+  /** Connection health monitor with auto-reconnect. */
+  healthMonitor: HealthMonitor;
+
+  /** Send a CDP command and await its result. */
+  sendCommand: (method: string, params?: Record<string, unknown>, sessionId?: string) => Promise<unknown>;
 
   /** Map of agent session IDs → session metadata. */
   sessions: Map<string, SessionInfo>;
