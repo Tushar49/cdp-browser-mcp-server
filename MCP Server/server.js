@@ -29,7 +29,7 @@
  * Env vars:
  *   CDP_PORT              Browser debugging port            (default: 9222)
  *   CDP_HOST              Browser debugging host            (default: 127.0.0.1)
- *   CDP_TIMEOUT           Command timeout in ms             (default: 30000)
+ *   CDP_TIMEOUT           Command timeout in ms             (default: 60000)
  *   CDP_SESSION_TTL       Agent session TTL in ms           (default: 300000)
  *   CDP_USER_DATA         Chrome User Data directory path
  *   CDP_PROFILE           Auto-connect to Chrome instance by name or path
@@ -52,7 +52,7 @@ import { fileURLToPath } from "url";
 
 const CDP_HOST = process.env.CDP_HOST || "127.0.0.1";
 const CDP_PORT = process.env.CDP_PORT || "9222";
-const CDP_TIMEOUT = parseInt(process.env.CDP_TIMEOUT) || 30000;
+const CDP_TIMEOUT = parseInt(process.env.CDP_TIMEOUT) || 60000;
 const SESSION_TTL = parseInt(process.env.CDP_SESSION_TTL) || 300000;
 const LONG_TIMEOUT = 120_000;
 const MAX_INLINE_LEN = 60_000;
@@ -1710,7 +1710,7 @@ const TOOLS = [
         profile: { type: "string", description: "Create tab in a specific Chrome profile (by name, email, or directory e.g. 'Work', 'mansha@gmail.com', 'Profile 7'). Requires the profile to have at least one open tab for context resolution." },
         showAll: { type: "boolean", description: "Show all browser tabs, not just session-owned ones (for list action)." },
         sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
-        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs, 'detach' keeps them, 'none' skips cleanup. Sticky per session." },
+        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'detach' (default) keeps tabs open, 'close' removes them, 'none' skips cleanup. Sticky per session." },
         exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
       },
       required: ["action"],
@@ -1784,7 +1784,7 @@ const TOOLS = [
         script: { type: "string", description: "Script for inject action." },
         enabled: { type: "boolean", description: "Enable/disable for bypass_csp." },
         sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
-        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs, 'detach' keeps them, 'none' skips cleanup. Sticky per session." },
+        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'detach' (default) keeps tabs open, 'close' removes them, 'none' skips cleanup. Sticky per session." },
         exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
       },
       required: ["action", "tabId"],
@@ -1863,7 +1863,7 @@ const TOOLS = [
         autoSnapshot: { type: "boolean", description: "Take accessibility snapshots before and after the action, return a diff of changes. Shows what changed without a separate snapshot call." },
         typoRate: { type: "number", description: "Probability of typing a wrong character then correcting (0-1, e.g. 0.03 = 3% per char). Requires charDelay or wordDelay to be set." },
         sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
-        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs, 'detach' keeps them, 'none' skips cleanup. Sticky per session." },
+        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'detach' (default) keeps tabs open, 'close' removes them, 'none' skips cleanup. Sticky per session." },
         exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
       },
       required: ["action", "tabId"],
@@ -1903,7 +1903,7 @@ const TOOLS = [
         uid: { type: "number", description: "Element uid for call." },
         selector: { type: "string", description: "CSS selector for call." },
         sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
-        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs, 'detach' keeps them, 'none' skips cleanup. Sticky per session." },
+        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'detach' (default) keeps tabs open, 'close' removes them, 'none' skips cleanup. Sticky per session." },
         exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
       },
       required: ["action", "tabId"],
@@ -1949,7 +1949,7 @@ const TOOLS = [
         last: { type: "number", description: "Return only last N items." },
         requestId: { type: "string", description: "Request ID for full body retrieval." },
         sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
-        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs, 'detach' keeps them, 'none' skips cleanup. Sticky per session." },
+        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'detach' (default) keeps tabs open, 'close' removes them, 'none' skips cleanup. Sticky per session." },
         exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
       },
       required: ["action", "tabId"],
@@ -2007,7 +2007,7 @@ const TOOLS = [
         extraHeaders: { type: "object", description: "Extra HTTP headers." },
         reset: { type: "boolean", description: "Reset all emulation overrides." },
         sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
-        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs, 'detach' keeps them, 'none' skips cleanup. Sticky per session." },
+        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'detach' (default) keeps tabs open, 'close' removes them, 'none' skips cleanup. Sticky per session." },
         exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
       },
       required: ["tabId"],
@@ -2052,7 +2052,7 @@ const TOOLS = [
         origin: { type: "string", description: "Origin for clear_data." },
         types: { type: "string", description: "Storage types: 'cookies,local_storage,indexeddb,cache_storage' or 'all'." },
         sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
-        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs, 'detach' keeps them, 'none' skips cleanup. Sticky per session." },
+        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'detach' (default) keeps tabs open, 'close' removes them, 'none' skips cleanup. Sticky per session." },
         exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
       },
       required: ["action", "tabId"],
@@ -2101,7 +2101,7 @@ const TOOLS = [
         body: { type: "string", description: "Response body for fulfill." },
         reason: { type: "string", enum: ["Failed", "Aborted", "TimedOut", "AccessDenied", "ConnectionClosed", "ConnectionReset", "ConnectionRefused", "ConnectionAborted", "ConnectionFailed", "NameNotResolved", "InternetDisconnected", "AddressUnreachable", "BlockedByClient", "BlockedByResponse"], description: "Failure reason." },
         sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
-        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs, 'detach' keeps them, 'none' skips cleanup. Sticky per session." },
+        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'detach' (default) keeps tabs open, 'close' removes them, 'none' skips cleanup. Sticky per session." },
         exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
       },
       required: ["action", "tabId"],
@@ -2123,7 +2123,7 @@ const TOOLS = [
       "- session: Explicitly end this agent session and clean up its owned tabs (optional: cleanupStrategy)",
       "- reset: Terminate ALL sessions and release all tab locks. Created tabs can optionally be closed (closeTabs: true), but pre-existing browser tabs are always preserved (optional: closeTabs)",
       "",
-      "Session params (all tools): sessionId — agent session ID for tab ownership/isolation; cleanupStrategy — close|detach|none for tab cleanup on expiry (default: close); exclusive — lock tabs to session (default: true)",
+      "Session params (all tools): sessionId — agent session ID for tab ownership/isolation; cleanupStrategy — close|detach|none for tab cleanup on expiry (default: detach); exclusive — lock tabs to session (default: true)",
     ].join("\n"),
     annotations: {
       title: "Session Cleanup",
@@ -2138,7 +2138,7 @@ const TOOLS = [
         tabId: { type: "string", description: "Tab ID for disconnect_tab." },
         closeTabs: { type: "boolean", description: "For reset: close tabs created by sessions (default: false). Pre-existing claimed tabs are NEVER closed." },
         sessionId: { type: "string", description: "Agent session ID for tab ownership and isolation. Tabs are locked to sessions. Default: per-process UUID." },
-        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'close' (default) removes tabs from browser, 'detach' keeps them open, 'none' skips cleanup. Sticky per session." },
+        cleanupStrategy: { type: "string", enum: ["close", "detach", "none"], description: "Tab cleanup on session expiry. 'detach' (default) keeps tabs open, 'close' removes them from browser, 'none' skips cleanup. Sticky per session." },
         exclusive: { type: "boolean", description: "Lock tab to this session (default: true). Set false to allow shared access." },
       },
       required: ["action"],
@@ -4861,7 +4861,7 @@ async function handleCleanupListSessions() {
     const ttl = Math.max(0, ((SESSION_TTL - (now - s.lastActivity)) / 1000)).toFixed(0);
     const ownedTabs = [...s.tabIds].filter(tid => tabLocks.get(tid)?.sessionId === id);
     const borrowedTabs = [...s.tabIds].filter(tid => tabLocks.get(tid)?.sessionId !== id);
-    let section = `Session: ${id.substring(0, 8)}\u2026\n  Last activity: ${age}s ago | TTL remaining: ${ttl}s\n  Cleanup strategy: ${s.cleanupStrategy || "close"}\n  Owned tabs: ${ownedTabs.length}`;
+    let section = `Session: ${id.substring(0, 8)}\u2026\n  Last activity: ${age}s ago | TTL remaining: ${ttl}s\n  Cleanup strategy: ${s.cleanupStrategy || "detach"}\n  Owned tabs: ${ownedTabs.length}`;
     if (ownedTabs.length) {
       for (const tid of ownedTabs) {
         const tab = tabMap.get(tid);
@@ -4899,7 +4899,7 @@ async function handleCleanupSession(args) {
   const session = agentSessions.get(sid);
   if (!session) return fail(`No session found.`);
 
-  const strategy = args.cleanupStrategy || session.cleanupStrategy || "close";
+  const strategy = args.cleanupStrategy || session.cleanupStrategy || "detach";
   let cleaned = 0;
   for (const tid of session.tabIds) {
     const lock = tabLocks.get(tid);
@@ -5119,7 +5119,7 @@ async function handleTool(name, args) {
   // Get or create session
   let session = agentSessions.get(sessionId);
   if (!session) {
-    session = { lastActivity: now, tabIds: new Set(), cleanupStrategy: cleanupStrategy || "close" };
+    session = { lastActivity: now, tabIds: new Set(), cleanupStrategy: cleanupStrategy || "detach" };
     agentSessions.set(sessionId, session);
   }
   session.lastActivity = now;
@@ -5280,6 +5280,19 @@ async function handleTool(name, args) {
  * Auto-include recent console errors/warnings in tool responses.
  * Appends any new error/warning messages that appeared since the last call.
  */
+const EXTENSION_PATTERNS = [
+  /chrome-extension:\/\//,
+  /moz-extension:\/\//,
+  /^Uncaught.*extension/i,
+  /^Failed to load resource.*chrome-extension/,
+];
+
+function isExtensionError(log) {
+  return EXTENSION_PATTERNS.some(pat =>
+    pat.test(log.text || '') || pat.test(log.url || '') || pat.test(log.source || '')
+  );
+}
+
 function appendConsoleErrors(result, tabId) {
   if (!tabId || result.isError) return result;
   const sid = activeSessions.get(tabId);
@@ -5287,7 +5300,7 @@ function appendConsoleErrors(result, tabId) {
 
   const logs = consoleLogs.get(sid) || [];
   const recentErrors = logs
-    .filter(l => l.level === "error" || l.level === "warning")
+    .filter(l => (l.level === "error" || l.level === "warning") && !isExtensionError(l))
     .slice(-5) // last 5 errors/warnings
     .map(l => `[${l.level.toUpperCase()}] ${l.text.substring(0, 150)}`);
 
