@@ -1,9 +1,10 @@
 {
   "name": "cdp-mcp-server",
-  "version": "4.13.0",
-  "description": "Lightweight MCP server for Chrome DevTools Protocol — lazy per-tab connections, no full browser enumeration",
+  "version": "5.0.0-alpha.1",
+  "description": "The power user's browser MCP — connects to your real Chrome/Edge/Brave with full DevTools capabilities",
   "type": "module",
-  "main": "server.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "author": "Tushar Agarwal",
   "license": "MIT",
   "repository": {
@@ -16,16 +17,33 @@
     "cdp",
     "chrome-devtools-protocol",
     "browser-automation",
-    "model-context-protocol"
+    "model-context-protocol",
+    "ai-agent",
+    "browser-mcp"
   ],
   "engines": {
     "node": ">=18"
   },
   "scripts": {
-    "start": "node server.js"
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "start:legacy": "node server.js",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "lint": "eslint src/",
+    "typecheck": "tsc --noEmit",
+    "clean": "node -e \"const fs=require('fs');fs.rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "ws": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.39",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.9"
   }
 }
