@@ -64,92 +64,28 @@ async function resolveUidToObjectId(
   ctx: ServerContext,
   sess: string,
   uid: number,
+  tabId?: string,
 ): Promise<{ objectId: string; backendNodeId: number }> {
-  // Get full AX tree and find the node with this uid
-  const { nodes } = await ctx.sendCommand('Accessibility.getFullAXTree', {}, sess) as {
-    nodes: Array<{
-      nodeId: string;
-      backendDOMNodeId?: number;
-      ignored?: boolean;
-      role?: { value: string };
-      name?: { value: string };
-      value?: { value: unknown };
-      properties?: Array<{ name: string; value: { value: unknown } }>;
-      childIds?: string[];
-    }>;
-  };
-
-  // Walk the AX tree and assign uids to find the matching node
-  let currentUid = 1;
-  const SKIP_ROLES = new Set(['none', 'GenericContainer', 'InlineTextBox']);
-  let targetBackendId: number | undefined;
-
-  // Collect non-ignored, non-structural nodes in tree order
-  const nodeMap = new Map<string, typeof nodes[0]>();
-  for (const n of nodes) nodeMap.set(n.nodeId, n);
-
-  // DFS walk matching the uid assignment logic from ElementResolver
-  function walk(nodeId: string): boolean {
-    const raw = nodeMap.get(nodeId);
-    if (!raw) return false;
-
-    if (raw.ignored) {
-      // Traverse children of ignored nodes
-      for (const childId of raw.childIds || []) {
-        if (walk(childId)) return true;
-      }
-      return false;
-    }
-
-    const role = raw.role?.value;
-    if (!role || SKIP_ROLES.has(role)) {
-      for (const childId of raw.childIds || []) {
-        if (walk(childId)) return true;
-      }
-      return false;
-    }
-
-    // This node gets a uid assigned
-    if (raw.backendDOMNodeId) {
-      if (currentUid === uid) {
-        targetBackendId = raw.backendDOMNodeId;
-        return true;
-      }
-      currentUid++;
-    } else {
-      currentUid++;
-    }
-
-    for (const childId of raw.childIds || []) {
-      if (walk(childId)) return true;
-    }
-    return false;
+  // Use per-tab ElementResolver for fast uid → backendNodeId lookup
+  const resolver = tabId ? ctx.elementResolvers.get(tabId) : undefined;
+  if (!resolver) {
+    throw Errors.staleRef(uid);
   }
-
-  // Find root nodes and walk
-  const roots = nodes.filter(n => {
-    const parent = nodes.find(p => p.childIds?.includes(n.nodeId));
-    return !parent;
-  });
-
-  for (const root of roots) {
-    if (walk(root.nodeId)) break;
-  }
-
-  if (!targetBackendId) {
+  const backendNodeId = resolver.resolve(uid);
+  if (backendNodeId === undefined) {
     throw Errors.staleRef(uid);
   }
 
   // Resolve backendNodeId → objectId
   const resolved = await ctx.sendCommand('DOM.resolveNode', {
-    backendNodeId: targetBackendId,
+    backendNodeId,
   }, sess) as { object: { objectId: string } };
 
   if (!resolved?.object?.objectId) {
     throw Errors.staleRef(uid);
   }
 
-  return { objectId: resolved.object.objectId, backendNodeId: targetBackendId };
+  return { objectId: resolved.object.objectId, backendNodeId };
 }
 
 // ─── Get AXNode info for a uid ──────────────────────────────────────
@@ -158,6 +94,7 @@ async function getAXNodeInfo(
   ctx: ServerContext,
   sess: string,
   uid: number,
+  tabId?: string,
 ): Promise<{
   role: string;
   name: string;
@@ -168,7 +105,20 @@ async function getAXNodeInfo(
   disabled?: boolean;
   backendNodeId: number;
 }> {
-  const { nodes } = await ctx.sendCommand('Accessibility.getFullAXTree', {}, sess) as {
+  // Use per-tab ElementResolver for fast uid → backendNodeId lookup
+  const resolver = tabId ? ctx.elementResolvers.get(tabId) : undefined;
+  if (!resolver) {
+    throw Errors.staleRef(uid);
+  }
+  const backendNodeId = resolver.resolve(uid);
+  if (backendNodeId === undefined) {
+    throw Errors.staleRef(uid);
+  }
+
+  // Get the AX node info for this specific backendNodeId
+  const { nodes } = await ctx.sendCommand('Accessibility.getFullAXTree', {
+    max_depth: 1, backendNodeId,
+  }, sess) as {
     nodes: Array<{
       nodeId: string;
       backendDOMNodeId?: number;
@@ -181,53 +131,7 @@ async function getAXNodeInfo(
     }>;
   };
 
-  let currentUid = 1;
-  const SKIP_ROLES = new Set(['none', 'GenericContainer', 'InlineTextBox']);
-  const nodeMap = new Map<string, typeof nodes[0]>();
-  for (const n of nodes) nodeMap.set(n.nodeId, n);
-
-  let foundNode: typeof nodes[0] | undefined;
-
-  function walk(nodeId: string): boolean {
-    const raw = nodeMap.get(nodeId);
-    if (!raw) return false;
-
-    if (raw.ignored) {
-      for (const childId of raw.childIds || []) {
-        if (walk(childId)) return true;
-      }
-      return false;
-    }
-
-    const role = raw.role?.value;
-    if (!role || SKIP_ROLES.has(role)) {
-      for (const childId of raw.childIds || []) {
-        if (walk(childId)) return true;
-      }
-      return false;
-    }
-
-    if (currentUid === uid) {
-      foundNode = raw;
-      return true;
-    }
-    currentUid++;
-
-    for (const childId of raw.childIds || []) {
-      if (walk(childId)) return true;
-    }
-    return false;
-  }
-
-  const roots = nodes.filter(n => {
-    const parent = nodes.find(p => p.childIds?.includes(n.nodeId));
-    return !parent;
-  });
-
-  for (const root of roots) {
-    if (walk(root.nodeId)) break;
-  }
-
+  const foundNode = nodes?.[0];
   if (!foundNode) throw Errors.staleRef(uid);
 
   // Parse properties
@@ -248,7 +152,7 @@ async function getAXNodeInfo(
     selected: props['selected'] === true ? true : undefined,
     expanded: typeof props['expanded'] === 'boolean' ? props['expanded'] : undefined,
     disabled: props['disabled'] === true ? true : undefined,
-    backendNodeId: foundNode.backendDOMNodeId ?? 0,
+    backendNodeId,
   };
 }
 
@@ -331,9 +235,10 @@ async function fillText(
   sess: string,
   uid: number,
   value: string,
+  tabId?: string,
 ): Promise<FieldResult> {
-  const { objectId } = await resolveUidToObjectId(ctx, sess, uid);
-  const axInfo = await getAXNodeInfo(ctx, sess, uid);
+  const { objectId } = await resolveUidToObjectId(ctx, sess, uid, tabId);
+  const axInfo = await getAXNodeInfo(ctx, sess, uid, tabId);
 
   // Focus, clear, and set value using React-compatible approach
   await ctx.sendCommand('Runtime.callFunctionOn', {
@@ -400,9 +305,10 @@ async function fillCombobox(
   sess: string,
   uid: number,
   value: string,
+  tabId?: string,
 ): Promise<FieldResult> {
-  const { objectId } = await resolveUidToObjectId(ctx, sess, uid);
-  const axInfo = await getAXNodeInfo(ctx, sess, uid);
+  const { objectId } = await resolveUidToObjectId(ctx, sess, uid, tabId);
+  const axInfo = await getAXNodeInfo(ctx, sess, uid, tabId);
 
   // 1. Focus and clear the combobox
   await ctx.sendCommand('Runtime.callFunctionOn', {
@@ -670,9 +576,10 @@ async function fillCheckbox(
   sess: string,
   uid: number,
   value: string,
+  tabId?: string,
 ): Promise<FieldResult> {
-  const { objectId } = await resolveUidToObjectId(ctx, sess, uid);
-  const axInfo = await getAXNodeInfo(ctx, sess, uid);
+  const { objectId } = await resolveUidToObjectId(ctx, sess, uid, tabId);
+  const axInfo = await getAXNodeInfo(ctx, sess, uid, tabId);
 
   const desired = value === 'true' || value === '1' || value === 'yes';
 
@@ -707,9 +614,10 @@ async function fillRadio(
   sess: string,
   uid: number,
   value: string,
+  tabId?: string,
 ): Promise<FieldResult> {
-  const { objectId } = await resolveUidToObjectId(ctx, sess, uid);
-  const axInfo = await getAXNodeInfo(ctx, sess, uid);
+  const { objectId } = await resolveUidToObjectId(ctx, sess, uid, tabId);
+  const axInfo = await getAXNodeInfo(ctx, sess, uid, tabId);
 
   await ctx.sendCommand('Runtime.callFunctionOn', {
     functionDeclaration: `function() {
@@ -737,9 +645,10 @@ async function fillSelect(
   sess: string,
   uid: number,
   value: string,
+  tabId?: string,
 ): Promise<FieldResult> {
-  const { objectId } = await resolveUidToObjectId(ctx, sess, uid);
-  const axInfo = await getAXNodeInfo(ctx, sess, uid);
+  const { objectId } = await resolveUidToObjectId(ctx, sess, uid, tabId);
+  const axInfo = await getAXNodeInfo(ctx, sess, uid, tabId);
 
   const result = await ctx.sendCommand('Runtime.callFunctionOn', {
     functionDeclaration: `function() {
@@ -832,9 +741,10 @@ async function fillDate(
   sess: string,
   uid: number,
   value: string,
+  tabId?: string,
 ): Promise<FieldResult> {
-  const { objectId } = await resolveUidToObjectId(ctx, sess, uid);
-  const axInfo = await getAXNodeInfo(ctx, sess, uid);
+  const { objectId } = await resolveUidToObjectId(ctx, sess, uid, tabId);
+  const axInfo = await getAXNodeInfo(ctx, sess, uid, tabId);
 
   const result = await ctx.sendCommand('Runtime.callFunctionOn', {
     functionDeclaration: `function() {
@@ -866,9 +776,10 @@ async function fillFile(
   sess: string,
   uid: number,
   value: string,
+  tabId?: string,
 ): Promise<FieldResult> {
-  const { backendNodeId } = await resolveUidToObjectId(ctx, sess, uid);
-  const axInfo = await getAXNodeInfo(ctx, sess, uid);
+  const { backendNodeId } = await resolveUidToObjectId(ctx, sess, uid, tabId);
+  const axInfo = await getAXNodeInfo(ctx, sess, uid, tabId);
   const files = value.split(',').map(f => f.trim());
 
   try {
@@ -893,32 +804,33 @@ async function smartFillField(
   uid: number,
   value: string,
   fieldType: FormField['type'],
+  tabId?: string,
 ): Promise<FieldResult> {
   // Detect field type from AX tree if auto
   let resolvedType: NonNullable<FormField['type']> = fieldType || 'auto';
 
   if (resolvedType === 'auto') {
-    const axInfo = await getAXNodeInfo(ctx, sess, uid);
+    const axInfo = await getAXNodeInfo(ctx, sess, uid, tabId);
     resolvedType = detectFieldType(axInfo.role);
   }
 
   switch (resolvedType) {
     case 'text':
-      return fillText(ctx, sess, uid, value);
+      return fillText(ctx, sess, uid, value, tabId);
     case 'combobox':
-      return fillCombobox(ctx, sess, uid, value);
+      return fillCombobox(ctx, sess, uid, value, tabId);
     case 'checkbox':
-      return fillCheckbox(ctx, sess, uid, value);
+      return fillCheckbox(ctx, sess, uid, value, tabId);
     case 'radio':
-      return fillRadio(ctx, sess, uid, value);
+      return fillRadio(ctx, sess, uid, value, tabId);
     case 'select':
-      return fillSelect(ctx, sess, uid, value);
+      return fillSelect(ctx, sess, uid, value, tabId);
     case 'date':
-      return fillDate(ctx, sess, uid, value);
+      return fillDate(ctx, sess, uid, value, tabId);
     case 'file':
-      return fillFile(ctx, sess, uid, value);
+      return fillFile(ctx, sess, uid, value, tabId);
     default:
-      return fillText(ctx, sess, uid, value);
+      return fillText(ctx, sess, uid, value, tabId);
   }
 }
 
@@ -928,12 +840,13 @@ async function readFields(
   ctx: ServerContext,
   sess: string,
   fields: FormField[],
+  tabId?: string,
 ): Promise<FieldResult[]> {
   const results: FieldResult[] = [];
 
   for (const field of fields) {
     try {
-      const axInfo = await getAXNodeInfo(ctx, sess, field.uid);
+      const axInfo = await getAXNodeInfo(ctx, sess, field.uid, tabId);
       const currentValue = axInfo.value ?? '';
       const stateInfo: string[] = [];
 
@@ -964,13 +877,14 @@ async function clearFields(
   ctx: ServerContext,
   sess: string,
   fields: FormField[],
+  tabId?: string,
 ): Promise<FieldResult[]> {
   const results: FieldResult[] = [];
 
   for (const field of fields) {
     try {
-      const axInfo = await getAXNodeInfo(ctx, sess, field.uid);
-      const { objectId } = await resolveUidToObjectId(ctx, sess, field.uid);
+      const axInfo = await getAXNodeInfo(ctx, sess, field.uid, tabId);
+      const { objectId } = await resolveUidToObjectId(ctx, sess, field.uid, tabId);
 
       const type = detectFieldType(axInfo.role);
 
@@ -1150,7 +1064,7 @@ export function registerFormTools(registry: ToolRegistry, _ctx: ServerContext): 
               const results: FieldResult[] = [];
               for (const field of args.fields) {
                 try {
-                  const result = await smartFillField(ctx, sess, field.uid, field.value!, field.type);
+                  const result = await smartFillField(ctx, sess, field.uid, field.value!, field.type, args.tabId);
                   results.push(result);
                 } catch (e: unknown) {
                   const msg = e instanceof Error ? e.message : String(e);
@@ -1163,12 +1077,12 @@ export function registerFormTools(registry: ToolRegistry, _ctx: ServerContext): 
             }
 
             case 'read': {
-              const results = await readFields(ctx, sess, args.fields);
+              const results = await readFields(ctx, sess, args.fields, args.tabId);
               return ok(formatResults('read', results));
             }
 
             case 'clear': {
-              const results = await clearFields(ctx, sess, args.fields);
+              const results = await clearFields(ctx, sess, args.fields, args.tabId);
               const hasFailures = results.some(r => !r.success);
               const text = formatResults('clear', results);
               return hasFailures ? { content: [{ type: 'text', text }], isError: true } : ok(text);

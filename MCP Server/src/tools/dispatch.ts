@@ -41,8 +41,16 @@ export async function preprocessToolCall(
   if (now - lastSweep > SWEEP_INTERVAL_MS) {
     lastSweep = now;
     ctx.sessions.sweepStale(ctx.config.sessionTTL, async (expired) => {
-      // Release tab locks for expired session
-      ctx.tabOwnership.releaseSession(expired.id);
+      // Release tab locks and close tabs when cleanupStrategy is 'close'
+      const tabIds = ctx.tabOwnership.releaseSession(expired.id);
+      if (expired.cleanupStrategy === 'close') {
+        for (const tabId of tabIds) {
+          try {
+            await ctx.sendCommand('Target.closeTarget', { targetId: tabId });
+          } catch { /* tab may already be closed */ }
+        }
+      }
+      // 'detach' and 'none' — just release locks, tabs stay open
     }).catch(() => { /* best-effort sweep */ });
   }
 

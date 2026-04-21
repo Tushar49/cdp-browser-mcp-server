@@ -110,12 +110,12 @@ async function handleClick(ctx: ServerContext, args: InteractArgs): Promise<Tool
   const retryTimeout = args.timeout || ctx.config.actionTimeout;
 
   const el = await withRetry(
-    () => resolveAndCheck(ctx, sess, args.uid, args.selector),
+    () => resolveAndCheck(ctx, sess, args.uid, args.selector, args.tabId),
     retryTimeout,
   );
 
   // Resolve backendNodeId for potential JS-click fallback
-  const { objectId, resolvedSession } = await resolveElementObjectId(ctx, sess, args.uid, args.selector);
+  const { objectId, resolvedSession } = await resolveElementObjectId(ctx, sess, args.uid, args.selector, args.tabId);
   const { node } = await ctx.sendCommand('DOM.describeNode', { objectId }, resolvedSession) as {
     node: { backendNodeId: number };
   };
@@ -173,7 +173,7 @@ async function handleHover(ctx: ServerContext, args: InteractArgs): Promise<Tool
   const sess = await getTabSession(ctx, args.tabId);
   const retryTimeout = args.timeout || ctx.config.actionTimeout;
   const el = await withRetry(
-    () => resolveElement(ctx, sess, args.uid, args.selector),
+    () => resolveElement(ctx, sess, args.uid, args.selector, args.tabId),
     retryTimeout,
   );
   const mods = modifierFlags(args.modifiers);
@@ -202,8 +202,8 @@ async function handleType(ctx: ServerContext, args: InteractArgs): Promise<ToolR
 
   // Resolve element and focus it
   const { objectId, resolvedSession } = await withRetry(async () => {
-    await resolveAndCheck(ctx, sess, args.uid, args.selector);
-    return resolveElementObjectId(ctx, sess, args.uid, args.selector);
+    await resolveAndCheck(ctx, sess, args.uid, args.selector, args.tabId);
+    return resolveElementObjectId(ctx, sess, args.uid, args.selector, args.tabId);
   }, retryTimeout);
 
   // Clear existing content if requested (default: true)
@@ -317,8 +317,8 @@ async function handleFill(ctx: ServerContext, args: InteractArgs): Promise<ToolR
   for (const field of args.fields) {
     try {
       const { objectId, resolvedSession: fieldSession } = await withRetry(async () => {
-        await resolveAndCheck(ctx, sess, field.uid, field.selector);
-        return resolveElementObjectId(ctx, sess, field.uid, field.selector);
+        await resolveAndCheck(ctx, sess, field.uid, field.selector, args.tabId);
+        return resolveElementObjectId(ctx, sess, field.uid, field.selector, args.tabId);
       }, retryTimeout);
 
       const fieldType = field.type || 'text';
@@ -376,8 +376,8 @@ async function handleSelect(ctx: ServerContext, args: InteractArgs): Promise<Too
   const retryTimeout = args.timeout || ctx.config.actionTimeout;
 
   const { objectId, resolvedSession } = await withRetry(async () => {
-    await resolveAndCheck(ctx, sess, args.uid, args.selector);
-    return resolveElementObjectId(ctx, sess, args.uid, args.selector);
+    await resolveAndCheck(ctx, sess, args.uid, args.selector, args.tabId);
+    return resolveElementObjectId(ctx, sess, args.uid, args.selector, args.tabId);
   }, retryTimeout);
 
   const result = await ctx.sendCommand('Runtime.callFunctionOn', {
@@ -472,11 +472,11 @@ async function handleDrag(ctx: ServerContext, args: InteractArgs): Promise<ToolR
   const retryTimeout = args.timeout || ctx.config.actionTimeout;
 
   const src = await withRetry(
-    () => resolveElement(ctx, sess, args.sourceUid, args.sourceSelector),
+    () => resolveElement(ctx, sess, args.sourceUid, args.sourceSelector, args.tabId),
     retryTimeout,
   );
   const tgt = await withRetry(
-    () => resolveElement(ctx, sess, args.targetUid, args.targetSelector),
+    () => resolveElement(ctx, sess, args.targetUid, args.targetSelector, args.tabId),
     retryTimeout,
   );
 
@@ -527,7 +527,7 @@ async function handleScroll(ctx: ServerContext, args: InteractArgs): Promise<Too
     const scrollY = args.y ?? 0;
     if (args.uid !== undefined || args.selector) {
       const { objectId, resolvedSession } = await withRetry(
-        () => resolveElementObjectId(ctx, sess, args.uid, args.selector),
+        () => resolveElementObjectId(ctx, sess, args.uid, args.selector, args.tabId),
         retryTimeout,
       );
       await ctx.sendCommand('Runtime.callFunctionOn', {
@@ -556,7 +556,7 @@ async function handleScroll(ctx: ServerContext, args: InteractArgs): Promise<Too
 
   if (args.uid !== undefined || args.selector) {
     const { objectId, resolvedSession } = await withRetry(
-      () => resolveElementObjectId(ctx, sess, args.uid, args.selector),
+      () => resolveElementObjectId(ctx, sess, args.uid, args.selector, args.tabId),
       retryTimeout,
     );
     await ctx.sendCommand('Runtime.callFunctionOn', {
@@ -590,7 +590,7 @@ async function handleUpload(ctx: ServerContext, args: InteractArgs): Promise<Too
 
   // Element specified — use direct file input approach
   const { objectId, resolvedSession } = await withRetry(
-    () => resolveElementObjectId(ctx, sess, args.uid, args.selector),
+    () => resolveElementObjectId(ctx, sess, args.uid, args.selector, args.tabId),
     retryTimeout,
   );
 
@@ -608,7 +608,7 @@ async function handleFocus(ctx: ServerContext, args: InteractArgs): Promise<Tool
   const sess = await getTabSession(ctx, args.tabId);
   const retryTimeout = args.timeout || ctx.config.actionTimeout;
   const { objectId, resolvedSession } = await withRetry(
-    () => resolveElementObjectId(ctx, sess, args.uid, args.selector),
+    () => resolveElementObjectId(ctx, sess, args.uid, args.selector, args.tabId),
     retryTimeout,
   );
 
@@ -633,8 +633,8 @@ async function handleCheck(ctx: ServerContext, args: InteractArgs): Promise<Tool
   const retryTimeout = args.timeout || ctx.config.actionTimeout;
 
   const { objectId, resolvedSession } = await withRetry(async () => {
-    await resolveAndCheck(ctx, sess, args.uid, args.selector);
-    return resolveElementObjectId(ctx, sess, args.uid, args.selector);
+    await resolveAndCheck(ctx, sess, args.uid, args.selector, args.tabId);
+    return resolveElementObjectId(ctx, sess, args.uid, args.selector, args.tabId);
   }, retryTimeout);
 
   await ctx.sendCommand('Runtime.callFunctionOn', {
@@ -658,7 +658,7 @@ async function handleTap(ctx: ServerContext, args: InteractArgs): Promise<ToolRe
   const sess = await getTabSession(ctx, args.tabId);
   const retryTimeout = args.timeout || ctx.config.actionTimeout;
   const el = await withRetry(
-    () => resolveAndCheck(ctx, sess, args.uid, args.selector),
+    () => resolveAndCheck(ctx, sess, args.uid, args.selector, args.tabId),
     retryTimeout,
   );
 
@@ -705,11 +705,42 @@ async function resolveElement(
   sess: string,
   uid?: number,
   selector?: string,
+  tabId?: string,
 ): Promise<ResolvedElement> {
   if (uid !== undefined) {
-    // TODO: Wire backendNodeId lookup from ElementResolver when integration is complete
-    // For now, throw a descriptive error
-    throw Errors.staleRef(uid);
+    // Resolve uid via per-tab ElementResolver → backendNodeId → box model + metadata
+    const resolver = tabId ? ctx.elementResolvers.get(tabId) : undefined;
+    if (!resolver) {
+      throw Errors.staleRef(uid);
+    }
+    const backendNodeId = resolver.resolve(uid);
+    if (backendNodeId === undefined) {
+      throw Errors.staleRef(uid);
+    }
+
+    // Resolve backendNodeId to objectId for metadata extraction
+    const { object } = await ctx.sendCommand('DOM.resolveNode', {
+      backendNodeId,
+    }, sess) as { object: { objectId?: string } };
+    if (!object?.objectId) throw Errors.staleRef(uid);
+
+    // Get bounding rect and element info via JS
+    const info = await ctx.sendCommand('Runtime.callFunctionOn', {
+      functionDeclaration: `function() {
+        const r = this.getBoundingClientRect();
+        return {
+          x: r.x + r.width / 2, y: r.y + r.height / 2,
+          w: r.width, h: r.height,
+          tag: this.tagName.toLowerCase(),
+          label: (this.getAttribute('aria-label') || this.textContent || '').trim().substring(0, 60),
+        };
+      }`,
+      objectId: object.objectId,
+      returnByValue: true,
+    }, sess) as { result: { value: ResolvedElement | null } };
+
+    if (!info.result.value) throw Errors.staleRef(uid);
+    return info.result.value;
   }
 
   if (!selector) throw new Error('Provide uid or selector to identify the element.');
@@ -741,9 +772,10 @@ async function resolveAndCheck(
   sess: string,
   uid?: number,
   selector?: string,
+  tabId?: string,
 ): Promise<ResolvedElement> {
   // resolveElement already checks existence; add actionability checks
-  const el = await resolveElement(ctx, sess, uid, selector);
+  const el = await resolveElement(ctx, sess, uid, selector, tabId);
   if (el.w === 0 && el.h === 0) {
     throw Errors.elementNotInteractable(uid ?? 0, 'Element has zero size — it may be hidden or collapsed.');
   }
@@ -758,10 +790,25 @@ async function resolveElementObjectId(
   sess: string,
   uid?: number,
   selector?: string,
+  tabId?: string,
 ): Promise<ResolvedElementObject> {
   if (uid !== undefined) {
-    // TODO: Wire backendNodeId lookup when integration is complete
-    throw Errors.staleRef(uid);
+    // Resolve uid via per-tab ElementResolver → backendNodeId → objectId
+    const resolver = tabId ? ctx.elementResolvers.get(tabId) : undefined;
+    if (!resolver) {
+      throw Errors.staleRef(uid);
+    }
+    const backendNodeId = resolver.resolve(uid);
+    if (backendNodeId === undefined) {
+      throw Errors.staleRef(uid);
+    }
+
+    const { object } = await ctx.sendCommand('DOM.resolveNode', {
+      backendNodeId,
+    }, sess) as { object: { objectId?: string } };
+    if (!object?.objectId) throw Errors.staleRef(uid);
+
+    return { objectId: object.objectId, resolvedSession: sess };
   }
 
   if (!selector) throw new Error('Provide uid or selector to identify the element.');

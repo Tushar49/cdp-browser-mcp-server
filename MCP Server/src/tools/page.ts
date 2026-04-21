@@ -270,8 +270,31 @@ async function handleScreenshot(ctx: ServerContext, args: PageArgs): Promise<Too
 
   // Element-level screenshot via uid
   if (args.uid !== undefined) {
-    // TODO: Wire resolveElement when element resolver integration is complete
-    return fail('Element-level screenshots require element resolver integration (coming soon). Omit uid for viewport screenshot.');
+    const resolver = ctx.elementResolvers.get(args.tabId);
+    const backendNodeId = resolver?.resolve(args.uid);
+    if (!backendNodeId) {
+      return fail(`Element uid=${args.uid} not found. Take a snapshot first.`);
+    }
+
+    try {
+      const { model } = await ctx.sendCommand('DOM.getBoxModel', { backendNodeId }, sess) as {
+        model?: { content: number[] };
+      };
+      if (model?.content) {
+        const q = model.content;
+        // content quad: [x1,y1, x2,y2, x3,y3, x4,y4]
+        const x = Math.min(q[0], q[2], q[4], q[6]);
+        const y = Math.min(q[1], q[3], q[5], q[7]);
+        const maxX = Math.max(q[0], q[2], q[4], q[6]);
+        const maxY = Math.max(q[1], q[3], q[5], q[7]);
+        params.clip = { x, y, width: maxX - x, height: maxY - y, scale: 1 };
+      }
+    } catch {
+      return fail(`Could not get layout for element uid=${args.uid}. It may be hidden or off-screen.`);
+    }
+
+    const { data } = await ctx.sendCommand('Page.captureScreenshot', params, sess) as { data: string };
+    return saveOrReturnScreenshot(data, params.format as string, args.path);
   }
 
   if (args.fullPage) {
@@ -332,8 +355,26 @@ async function handleContent(ctx: ServerContext, args: PageArgs): Promise<ToolRe
   const prop = args.format === 'html' ? 'innerHTML' : 'innerText';
 
   if (args.uid !== undefined || args.selector) {
-    // TODO: Wire resolveElementObjectId when element resolver integration is complete
-    // For now, support selector-based content extraction
+    if (args.uid !== undefined) {
+      // Resolve uid via ElementResolver
+      const resolver = ctx.elementResolvers.get(args.tabId);
+      const backendNodeId = resolver?.resolve(args.uid);
+      if (!backendNodeId) {
+        return fail(`Element uid=${args.uid} not found. Take a snapshot first.`);
+      }
+      const { object } = await ctx.sendCommand('DOM.resolveNode', {
+        backendNodeId,
+      }, sess) as { object: { objectId?: string } };
+      if (!object?.objectId) {
+        return fail(`Element uid=${args.uid} is stale — take a new snapshot.`);
+      }
+      const result = await ctx.sendCommand('Runtime.callFunctionOn', {
+        functionDeclaration: `function() { return this.${prop}; }`,
+        objectId: object.objectId,
+        returnByValue: true,
+      }, sess) as { result: { value: string } };
+      return ok(result.result.value ?? '(empty)');
+    }
     if (args.selector) {
       const result = await ctx.sendCommand('Runtime.evaluate', {
         expression: `document.querySelector(${JSON.stringify(args.selector)})?.${prop} ?? '(not found)'`,
@@ -341,7 +382,6 @@ async function handleContent(ctx: ServerContext, args: PageArgs): Promise<ToolRe
       }, sess) as { result: { value: string } };
       return ok(result.result.value ?? '(empty)');
     }
-    return fail('Element content by uid requires element resolver integration. Use selector instead.');
   }
 
   // Default: body
@@ -582,9 +622,9 @@ function saveOrReturnScreenshot(
   savePath?: string,
 ): ToolResult {
   if (savePath) {
-    // TODO: Wire fs operations when running in full server context
     const buf = Buffer.from(data, 'base64');
-    return ok(`Screenshot captured (${(buf.length / 1024).toFixed(1)} KB). Save path: ${savePath}`);
+    writeFileSync(savePath, buf);
+    return ok(`Screenshot saved to: ${savePath} (${(buf.length / 1024).toFixed(1)} KB)`);
   }
   return {
     content: [{
@@ -640,7 +680,7 @@ const PAGE_DESCRIPTION = [
   '- forward: Navigate forward in browser history (requires: tabId; optional: waitUntil, timeout)',
   '- reload: Reload the current page (requires: tabId; optional: ignoreCache, waitUntil, timeout)',
   '- snapshot: Capture accessibility tree snapshot with element refs for interaction (requires: tabId)',
-  '- screenshot: Take a screenshot of the page (requires: tabId; optional: fullPage, quality, type[png|jpeg], path — absolute file path to save to disk)',
+  '- screenshot: Take a screenshot of the page or a specific element (requires: tabId; optional: fullPage, quality, uid, type[png|jpeg], path — absolute file path to save to disk)',
   "- content: Extract text or HTML content from the page or an element (requires: tabId; optional: uid, selector, format[text|html|full] — 'full' returns complete document HTML with doctype)",
   "- set_content: Set the page's HTML content directly (requires: tabId, html)",
   "- wait: Wait for condition or fixed delay (requires: tabId; provide text, textGone, selector for polling — or just timeout for fixed delay; optional: timeout[ms], state[visible|hidden|attached|detached] for selector waits)",

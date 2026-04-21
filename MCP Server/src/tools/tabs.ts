@@ -75,12 +75,15 @@ async function handleFind(
   if (!query) return fail("Provide 'query' to search tabs.");
 
   const q = query.toLowerCase();
+  const sessionId = args._agentSessionId as string | undefined;
+  let showAll = args.showAll as boolean | undefined;
+
   const targets = (await ctx.sendCommand('Target.getTargets', {
     filter: [{ type: 'page' }],
   })) as { targetInfos: Array<Record<string, unknown>> };
 
-  const tabs = targets.targetInfos ?? [];
-  const hits = tabs.filter((t) => {
+  let tabs = targets.targetInfos ?? [];
+  let hits = tabs.filter((t) => {
     const title = (t.title as string).toLowerCase();
     const url = (t.url as string).toLowerCase();
     return title.includes(q) || url.includes(q);
@@ -88,7 +91,20 @@ async function handleFind(
 
   if (!hits.length) return ok(`No tabs matching "${query}".`);
 
-  const sessionId = args._agentSessionId as string | undefined;
+  // Apply ownership filtering unless showAll
+  if (!showAll && sessionId) {
+    const filtered = hits.filter((t) => {
+      const lock = ctx.tabOwnership.getLock(t.targetId as string);
+      return !lock?.sessionId || lock.sessionId === sessionId;
+    });
+    // If filtering removes all results, auto-enable showAll
+    if (filtered.length === 0) {
+      showAll = true;
+    } else {
+      hits = filtered;
+    }
+  }
+
   const lines = hits.map((t) => {
     const targetId = t.targetId as string;
     const title = t.title as string;
