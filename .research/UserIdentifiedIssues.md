@@ -6,6 +6,11 @@ All issues below are extracted from real usage sessions (chat1-5.md) where the C
 
 ## CRITICAL — Blocks core workflows
 
+### 0. Agents can't figure out how to connect — hallucinate and break things
+Many times no browser is connected. Agents try tabs.list() first → get error → then try to close the browser and relaunch with debugging port (even though it was already running with debugging) → hallucinate because of wrong results → "fuck things up". The tool names and call order are confusing. Agents think CDP is "not available" and give up, or they try to kill the browser process which disrupts user's work. The entire tool surface is too complex for agents to use correctly without extensive prompting.
+- Root cause: No auto-connect, confusing error messages, tools don't self-document proper usage flow
+- Fix: Auto-connect transparently, simplify tool surface, add agent guidance in tool descriptions
+
 ### 1. Server doesn't auto-reconnect
 Agents start fresh sessions and immediately try `tabs.new()` without connecting first. Server silently fails or returns "no target found". No tool error says "you need to connect first".
 - chat4.md: Agent tried to open mashtest tab, failed, user had to debug manually
