@@ -51,6 +51,18 @@ export class TabSessionService {
     const sessionId = result.sessionId;
     this.sessions.set(tabId, sessionId);
     cdpClient.poolSession(tabId, sessionId);
+
+    // Enable auto-attach for OOP (cross-origin) iframe discovery
+    try {
+      await cdpClient.send('Target.setAutoAttach', {
+        autoAttach: true,
+        waitForDebuggerOnStart: false,
+        flatten: true,
+      }, sessionId);
+    } catch {
+      // Older Chrome versions may not support auto-attach on page sessions
+    }
+
     return sessionId;
   }
 

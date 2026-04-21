@@ -16,6 +16,7 @@ import { ActionableError, Errors, wrapError } from '../utils/error-handler.js';
 import { sleep, waitForReadyState, waitForText, waitForTextGone, waitForSelector } from '../utils/wait.js';
 import type { WaitUntil, SelectorState } from '../utils/wait.js';
 import { TempFileManager } from '../utils/temp-files.js';
+import type { AXNode } from '../snapshot/accessibility.js';
 
 // ─── Path Security ──────────────────────────────────────────────────
 
@@ -237,8 +238,22 @@ async function handleFrames(ctx: ServerContext, args: PageArgs): Promise<ToolRes
     // Frame tree unavailable
   }
 
-  // TODO: OOP (cross-origin) frames from auto-attached child sessions
-  // Will be wired when session management is integrated
+  // OOP (cross-origin) frames from auto-attached child sessions
+  const childSessions = ctx.tabSessions.getChildSessions(sess);
+  if (childSessions.size > 0) {
+    let idx = frames.length;
+    for (const [targetId, { sessionId: childSess, url: frameUrl }] of childSessions) {
+      frames.push({
+        index: idx++,
+        id: targetId,
+        url: frameUrl,
+        securityOrigin: '',
+        type: 'cross-origin',
+        depth: 1,
+        sessionId: childSess,
+      });
+    }
+  }
 
   if (frames.length === 0) return ok('No frames found.');
   const lines = frames.map(
@@ -250,30 +265,69 @@ async function handleFrames(ctx: ServerContext, args: PageArgs): Promise<ToolRes
 async function handleSnapshot(ctx: ServerContext, args: PageArgs): Promise<ToolResult> {
   const sess = await getTabSession(ctx, args.tabId);
 
-  // TODO: Wire buildSnapshot from snapshot module when integration is complete.
-  // For now, capture raw accessibility tree via CDP.
-  const { captureAccessibilityTree, serializeTree } = await import('../snapshot/accessibility.js');
+  const { captureAccessibilityTree, captureFullTree, serializeTree } = await import('../snapshot/accessibility.js');
   const { TokenOptimizer } = await import('../snapshot/token-optimizer.js');
-
-  const tree = await captureAccessibilityTree(
-    (method, params) => ctx.sendCommand(method, params as Record<string, unknown>, sess) as Promise<any>,
-    sess,
-  );
-
-  // Optimize the tree for LLM consumption
-  const optimized = TokenOptimizer.optimize(tree);
+  const { ElementResolver } = await import('../snapshot/element-resolver.js');
 
   // P1-2: Use per-tab ElementResolver for stable uid refs across snapshots
-  const { ElementResolver } = await import('../snapshot/element-resolver.js');
   let resolver = ctx.elementResolvers.get(args.tabId);
   if (!resolver) {
     resolver = new ElementResolver();
     ctx.elementResolvers.set(args.tabId, resolver);
   }
-  resolver.assignRefs(optimized);
 
-  const snapshot = serializeTree(optimized);
-  const nodeCount = countNodes(optimized);
+  // Build a cdpSend that routes __sessionId-tagged calls to the right child session
+  const cdpSend = (method: string, params?: Record<string, unknown>) => {
+    const childSessId = params?.__sessionId as string | undefined;
+    if (childSessId) {
+      const { __sessionId: _, ...rest } = params!;
+      return ctx.sendCommand(method, rest, childSessId) as Promise<any>;
+    }
+    return ctx.sendCommand(method, params, sess) as Promise<any>;
+  };
+
+  // Capture OOP (cross-origin) iframe child sessions
+  const childSessions = ctx.tabSessions.getChildSessions(sess);
+
+  let snapshot: string;
+  let nodeCount: number;
+  let allOptimized: AXNode[];
+
+  if (childSessions.size > 0) {
+    // Multi-frame capture: main + OOP iframes
+    const fullTree = await captureFullTree(cdpSend as any, sess, childSessions);
+
+    const optimizedMain = TokenOptimizer.optimize(fullTree.mainNodes);
+    resolver.assignRefs(optimizedMain);
+    const mainSnapshot = serializeTree(optimizedMain);
+
+    const frameParts: string[] = [];
+    const frameOptimized: AXNode[] = [];
+    let frameIndex = 1;
+    for (const [, { nodes }] of fullTree.frameNodes) {
+      const optimizedFrame = TokenOptimizer.optimize(nodes);
+      resolver.assignRefs(optimizedFrame);
+      frameParts.push(serializeTree(optimizedFrame, 0, `[frame ${frameIndex}] `));
+      frameOptimized.push(...optimizedFrame);
+      frameIndex++;
+    }
+
+    // Store uid → session routing for cross-frame element interaction
+    ctx.tabSessions.setRefRouting(sess, fullTree.refRouting);
+
+    const allParts = [mainSnapshot, ...frameParts].filter(Boolean);
+    snapshot = allParts.join('\n');
+    allOptimized = [...optimizedMain, ...frameOptimized];
+    nodeCount = countNodes(allOptimized);
+  } else {
+    // Single-frame capture (common case)
+    const tree = await captureAccessibilityTree(cdpSend as any, sess);
+    const optimized = TokenOptimizer.optimize(tree);
+    resolver.assignRefs(optimized);
+    snapshot = serializeTree(optimized);
+    allOptimized = optimized;
+    nodeCount = countNodes(optimized);
+  }
 
   // Get page title and URL
   let title = '';
@@ -289,7 +343,7 @@ async function handleSnapshot(ctx: ServerContext, args: PageArgs): Promise<ToolR
   if (args.diff && ctx.snapshotCache) {
     const diffResult = ctx.snapshotCache.diff(args.tabId, snapshot);
     // Store updated snapshot in cache after diffing
-    ctx.snapshotCache.set(args.tabId, snapshot, optimized, currentUrl);
+    ctx.snapshotCache.set(args.tabId, snapshot, allOptimized, currentUrl);
     if (diffResult.changed) {
       return ok(`### Snapshot Changes (${diffResult.added} added, ${diffResult.removed} removed)\n${diffResult.lines.join('\n')}`);
     } else {
@@ -299,7 +353,7 @@ async function handleSnapshot(ctx: ServerContext, args: PageArgs): Promise<ToolR
 
   // Store in cache
   if (ctx.snapshotCache && args.tabId) {
-    ctx.snapshotCache.set(args.tabId, snapshot, optimized, currentUrl);
+    ctx.snapshotCache.set(args.tabId, snapshot, allOptimized, currentUrl);
   }
 
   const header = `Page: ${title}\nURL: ${currentUrl}\nElements: ${nodeCount}\n\n`;

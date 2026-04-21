@@ -188,6 +188,88 @@ export async function captureAccessibilityTree(
   return result;
 }
 
+/**
+ * Capture accessibility trees from the main frame AND all OOP (cross-origin) iframes.
+ *
+ * This is the multi-frame equivalent of `captureAccessibilityTree`. It also captures
+ * same-origin iframes via frameId, then OOP iframes via their child CDP sessions.
+ * Returns all trees plus a routing map so element interactions can target the correct session.
+ */
+export async function captureFullTree(
+  cdpSend: CdpSend,
+  mainSessionId: string,
+  childSessions: Map<string, { sessionId: string; url: string }>,
+): Promise<FullTreeResult> {
+  const mainNodes: AXNode[] = [];
+  const frameNodes = new Map<string, { nodes: AXNode[]; url: string }>();
+  const refRouting = new Map<number, string>();
+
+  // 1. Capture same-origin frames via Page.getFrameTree
+  let frameIds: Array<string | null> = [null]; // null = root frame
+  try {
+    const { frameTree } = (await cdpSend('Page.getFrameTree', {})) as {
+      frameTree: { frame: { id: string }; childFrames?: any[] };
+    };
+    frameIds = collectFrameIds(frameTree);
+  } catch {
+    // Can't get frame tree — root frame only
+  }
+
+  for (const frameId of frameIds) {
+    try {
+      const nodes = await captureAccessibilityTree(cdpSend, mainSessionId, frameId ?? undefined);
+      if (nodes.length > 0) {
+        mainNodes.push(...nodes);
+      }
+    } catch {
+      // Individual frame failure — continue with others
+    }
+  }
+
+  // 2. Capture OOP (cross-origin) iframe content via child CDP sessions
+  if (childSessions.size > 0) {
+    for (const [targetId, { sessionId: childSess, url: frameUrl }] of childSessions) {
+      try {
+        const childCdpSend: CdpSend = (method, params) =>
+          cdpSend(method, { ...params, __sessionId: childSess });
+        const nodes = await captureAccessibilityTree(childCdpSend, childSess);
+        if (nodes.length > 0) {
+          // Tag all nodes in this frame with their child session for routing
+          tagNodesWithSession(nodes, childSess, refRouting);
+          frameNodes.set(targetId, { nodes, url: frameUrl });
+        }
+      } catch {
+        // OOP frame capture failure — continue with others
+      }
+    }
+  }
+
+  return { mainNodes, frameNodes, refRouting };
+}
+
+/** Collect all frame IDs from a Page.getFrameTree response. */
+function collectFrameIds(frameTree: { frame: { id: string }; childFrames?: any[] }): Array<string | null> {
+  const ids: Array<string | null> = [frameTree.frame.id];
+  if (frameTree.childFrames) {
+    for (const child of frameTree.childFrames) {
+      ids.push(...collectFrameIds(child));
+    }
+  }
+  return ids;
+}
+
+/** Record uid → session routing for all nodes with assigned uids. */
+function tagNodesWithSession(nodes: AXNode[], sessionId: string, routing: Map<number, string>): void {
+  for (const node of nodes) {
+    if (node.uid !== undefined) {
+      routing.set(node.uid, sessionId);
+    }
+    if (node.children) {
+      tagNodesWithSession(node.children, sessionId, routing);
+    }
+  }
+}
+
 // ─── Serialization ──────────────────────────────────────────────────
 
 /** Property names that map to simple boolean flags in serialized output */
