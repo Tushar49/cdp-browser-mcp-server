@@ -184,4 +184,34 @@ describe('SessionManager', () => {
       expect(callback).toHaveBeenCalledTimes(2);
     });
   });
+
+  describe('browserContextId (profile pinning)', () => {
+    it('starts with no browserContextId', () => {
+      const session = mgr.getOrCreate('s1', 'detach');
+      expect(session.browserContextId).toBeUndefined();
+    });
+
+    it('preserves browserContextId across getOrCreate calls', () => {
+      const session = mgr.getOrCreate('s1', 'detach');
+      session.browserContextId = 'ABC123';
+      const same = mgr.getOrCreate('s1', 'detach');
+      expect(same.browserContextId).toBe('ABC123');
+    });
+
+    it('does not share browserContextId between sessions', () => {
+      const s1 = mgr.getOrCreate('s1', 'detach');
+      const s2 = mgr.getOrCreate('s2', 'detach');
+      s1.browserContextId = 'PROFILE-A';
+      expect(s2.browserContextId).toBeUndefined();
+    });
+
+    it('clears browserContextId on session end', async () => {
+      const session = mgr.getOrCreate('s1', 'detach');
+      session.browserContextId = 'PROFILE-X';
+      await mgr.end('s1', async () => {});
+      // Re-create same session ID — should be fresh
+      const fresh = mgr.getOrCreate('s1', 'detach');
+      expect(fresh.browserContextId).toBeUndefined();
+    });
+  });
 });

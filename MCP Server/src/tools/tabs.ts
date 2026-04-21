@@ -6,6 +6,7 @@
 
 import type { ServerContext, ToolResult } from '../types.js';
 import type { ToolRegistry } from './registry.js';
+import type { AgentSession } from '../session/session-manager.js';
 import { defineTool } from './base-tool.js';
 import { ok, fail } from '../utils/helpers.js';
 import { Errors } from '../utils/error-handler.js';
@@ -57,7 +58,10 @@ async function handleList(
       lock?.sessionId && lock.sessionId !== sessionId
         ? ` [locked by: ${lock.sessionId.substring(0, 8)}…]`
         : '';
-    return `${i + 1}. [${targetId}]${lockTag}\n   ${title}\n   ${url}`;
+    const profileCtx = (t.browserContextId as string | undefined)
+      ? ` [profile:${(t.browserContextId as string).substring(0, 8)}]`
+      : '';
+    return `${i + 1}. [${targetId}]${lockTag}${profileCtx}\n   ${title}\n   ${url}`;
   });
 
   const prefix = autoShowAll
@@ -131,6 +135,12 @@ async function handleNew(
 
   // Phase 1: Create the tab with about:blank (no URL yet)
   const createParams: Record<string, unknown> = { url: 'about:blank', background };
+
+  // Profile-sticky sessions: if no explicit profile, use session's pinned profile
+  const session = args._agentSession as AgentSession | undefined;
+  if (!args.profile && session?.browserContextId) {
+    createParams.browserContextId = session.browserContextId;
+  }
 
   // Issue #11: Profile-aware tab creation — resolve profile name to browserContextId
   if (args.profile) {
@@ -249,13 +259,24 @@ async function handleNew(
   const targetId = result.targetId;
 
   // Register ownership so tabs.list shows the tab immediately
-  const session = args._agentSession as
-    | { tabIds: Set<string> }
-    | undefined;
+  const ownerSession = args._agentSession as AgentSession | undefined;
   const sessionId = args._agentSessionId as string | undefined;
-  if (session && sessionId) {
-    session.tabIds.add(targetId);
+  if (ownerSession && sessionId) {
+    ownerSession.tabIds.add(targetId);
     ctx.tabOwnership.lock(targetId, sessionId, true, 'created');
+  }
+
+  // Pin profile to session if not already pinned
+  if (ownerSession && !ownerSession.browserContextId) {
+    try {
+      const targets = (await ctx.sendCommand('Target.getTargets', {})) as {
+        targetInfos?: Array<{ targetId: string; browserContextId?: string }>;
+      };
+      const newTab = targets?.targetInfos?.find((t) => t.targetId === targetId);
+      if (newTab?.browserContextId) {
+        ownerSession.browserContextId = newTab.browserContextId;
+      }
+    } catch { /* best-effort profile detection */ }
   }
 
   // Phase 2: Attach CDP session to the new tab
@@ -378,6 +399,84 @@ async function handleInfo(
   );
 }
 
+async function handleSetProfile(
+  ctx: ServerContext,
+  args: Record<string, unknown>,
+): Promise<ToolResult> {
+  const profileInput = args.profile as string | undefined;
+  const session = args._agentSession as AgentSession | undefined;
+  if (!session) return fail('No active session.');
+  if (!profileInput) return fail("Provide 'profile' (name, email, or directory).");
+
+  const query = profileInput.trim().toLowerCase();
+
+  try {
+    const { browserContextIds } = (await ctx.sendCommand(
+      'Target.getBrowserContexts',
+      {},
+    )) as { browserContextIds: string[] };
+
+    const { targetInfos } = (await ctx.sendCommand('Target.getTargets', {
+      filter: [{ type: 'page' }],
+    })) as { targetInfos: Array<Record<string, unknown>> };
+
+    // Collect all known context IDs
+    const allContextIds = new Set<string>();
+    for (const t of targetInfos ?? []) {
+      const ctxId = t.browserContextId as string | undefined;
+      if (ctxId) allContextIds.add(ctxId);
+    }
+    for (const cid of browserContextIds) allContextIds.add(cid);
+
+    // Direct context ID match
+    if (allContextIds.has(profileInput)) {
+      session.browserContextId = profileInput;
+      return ok(`Session pinned to profile context: ${profileInput}`);
+    }
+
+    // Try profile metadata resolution
+    const { discoverBrowserInstances } = await import(
+      '../connection/browser-discovery.js'
+    );
+    const instances = discoverBrowserInstances();
+    const contextTabs = new Map<string, Array<Record<string, unknown>>>();
+    for (const t of targetInfos ?? []) {
+      const ctxId = t.browserContextId as string | undefined;
+      if (ctxId) {
+        if (!contextTabs.has(ctxId)) contextTabs.set(ctxId, []);
+        contextTabs.get(ctxId)!.push(t);
+      }
+    }
+
+    const available: string[] = [];
+    for (const ctxId of allContextIds) {
+      const tabs = contextTabs.get(ctxId) ?? [];
+      for (const inst of instances) {
+        for (const p of inst.profiles) {
+          const nameMatch = p.name.toLowerCase() === query;
+          const emailMatch = p.email?.toLowerCase() === query;
+          const dirMatch = p.directory.toLowerCase() === query;
+          if ((nameMatch || emailMatch || dirMatch) && tabs.length > 0) {
+            session.browserContextId = ctxId;
+            return ok(
+              `Session pinned to profile "${p.name}" (context: ${ctxId.substring(0, 12)}…)`,
+            );
+          }
+        }
+      }
+      available.push(`  ${ctxId.substring(0, 12)}… — ${tabs.length} tab(s)`);
+    }
+
+    return fail(
+      `Profile "${profileInput}" not found.\n\nAvailable contexts:\n${available.join('\n')}`,
+    );
+  } catch (err) {
+    return fail(
+      `Failed to resolve profile: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
 // ─── Action Dispatch ────────────────────────────────────────────────
 
 const ACTIONS: Record<
@@ -390,6 +489,7 @@ const ACTIONS: Record<
   close: handleClose,
   activate: handleActivate,
   info: handleInfo,
+  set_profile: handleSetProfile,
 };
 
 // ─── Registration ───────────────────────────────────────────────────
@@ -406,6 +506,8 @@ export function registerTabsTools(
         '',
         "Default cleanup is 'detach' — tabs stay open after your session ends. You don't need to set cleanupStrategy unless you want tabs auto-closed.",
         '',
+        'Sessions are automatically pinned to the Chrome profile where they first create or claim a tab. New tabs always open in the session\'s profile, even if you manually switch profiles in Chrome. Use tabs.new with profile:\'Name\' to override, or tabs.set_profile to change the session\'s default profile.',
+        '',
         'Use showAll: true to see ALL browser tabs, not just ones you created this session.',
         '',
         'Operations:',
@@ -415,13 +517,14 @@ export function registerTabsTools(
         '- close: Close a specific tab (requires: tabId)',
         '- activate: Bring a tab to the foreground (requires: tabId)',
         '- info: Get detailed info about a tab including URL, title, and connection status (requires: tabId)',
+        '- set_profile: Pin session to a specific Chrome profile (requires: profile — name/email/directory)',
       ].join('\n'),
       inputSchema: {
         type: 'object',
         properties: {
           action: {
             type: 'string',
-            enum: ['list', 'find', 'new', 'close', 'activate', 'info'],
+            enum: ['list', 'find', 'new', 'close', 'activate', 'info', 'set_profile'],
             description: 'Tab action to perform.',
           },
           query: {
