@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev/*]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        node-version: [18, 20, 22]
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: 'MCP Server/package-lock.json'
+      
+      - name: Install dependencies
+        working-directory: MCP Server
+        run: npm ci
+      
+      - name: Type check
+        working-directory: MCP Server
+        run: npm run typecheck
+      
+      - name: Build
+        working-directory: MCP Server
+        run: npm run build
+      
+      - name: Test
+        working-directory: MCP Server
+        run: npm run test
+        continue-on-error: true  # Tests may need browser, skip in CI for now

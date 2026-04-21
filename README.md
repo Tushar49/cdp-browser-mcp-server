@@ -7,9 +7,9 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-4.13.0-blue" alt="Version">
-  <img src="https://img.shields.io/badge/tools-11-green" alt="Tools">
-  <img src="https://img.shields.io/badge/sub--actions-87+-green" alt="Actions">
+  <img src="https://img.shields.io/badge/version-5.0.0--alpha.1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/tools-14-green" alt="Tools">
+  <img src="https://img.shields.io/badge/sub--actions-90+-green" alt="Actions">
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen" alt="Node">
   <img src="https://img.shields.io/badge/license-MIT-yellow" alt="License">
 </p>
@@ -38,7 +38,30 @@ CDP Browser MCP Server connects to your **already-running** browser over a WebSo
 | Browser Use needs Python + LLM key | Heavy framework, double LLM cost |
 | BrowserTools MCP is read-only | Can observe but can't automate |
 
-**This server**: connects to Chrome on `localhost:9222`, uses the real browser state, and gives you **87+ automation actions** across 11 tools — all from a single `server.js` file with 2 dependencies. Geolocation spoofing automatically grants browser permissions so permission-based sites just work.
+**This server**: connects to Chrome on `localhost:9222`, uses the real browser state, and gives you **90+ automation actions** across 14 tools — built as a modular TypeScript codebase with 2 dependencies. Geolocation spoofing automatically grants browser permissions so permission-based sites just work.
+
+---
+
+## What's New in v5.0.0
+
+> **Complete architecture restructure** — from a single 254KB file to 38 TypeScript modules.
+
+| Feature | Description |
+|---------|-------------|
+| 🏗️ **Modular Architecture** | 38 TypeScript files organized into `connection/`, `session/`, `snapshot/`, `tools/`, `utils/` — strict mode, fully typed |
+| 📝 **Smart Form Filling** | New `form` tool — handles text, combobox, checkbox, radio, select, date in a single call. React/Greenhouse combobox support with smart matching |
+| 🔌 **Auto-Connect** | Server discovers and connects to Chrome/Edge/Brave on first tool call — no more `browser.connect()` needed |
+| 🎯 **Stable Element Refs** | UIDs persist across snapshots within the same page via cumulative ElementResolver |
+| ⏱️ **60s Default Timeout** | SPA-friendly — D365, SharePoint, and heavy apps no longer time out |
+| 📦 **Token-Optimized Snapshots** | Role filtering, depth limiting, text truncation. ~15KB average (down from 34KB) |
+| 🔄 **Auto-Reconnect** | Exponential backoff reconnection on browser disconnect |
+| 💡 **Actionable Errors** | 17 error types with "How to fix" suggestions — agents recover without human help |
+| 🖱️ **JS-Click Fallback** | Click auto-falls back to `el.click()` for framework sites (LinkedIn, React, Angular) |
+| 🚫 **Modal State System** | Dialogs and file choosers block other tools with recovery instructions |
+| ⚡ **Lazy CDP Domains** | Domains enabled on first use, not at connect time — faster startup |
+| 📊 **Snapshot Caching** | Per-tab cache for snapshot reuse — reduces redundant tree captures |
+| 🤖 **Agent Guidance** | All 14 tool descriptions include usage guidance and common pitfalls |
+| 🧹 **Default: Detach** | Tabs never auto-close when session expires — agents can't accidentally kill your tabs |
 
 ---
 
@@ -49,8 +72,11 @@ CDP Browser MCP Server connects to your **already-running** browser over a WebSo
 | Connects to real browser | **Yes** | Via flag only | No (cloud) | No | Read-only |
 | Preserves cookies/sessions | **Yes** | No | No | No | Yes |
 | Works with extensions | **Yes** | No | No | No | Yes |
-| Tool count | **11 tools, 84+ actions** | ~30 tools | ~10 tools | 7 tools | ~13 tools |
+| Tool count | **14 tools, 90+ actions** | ~30 tools | ~10 tools | 7 tools | ~13 tools |
+| Auto-connect | **Yes** (first tool call) | No | N/A | No | No |
 | Auto-waiting after actions | **Yes** | Yes | Yes | No | N/A |
+| Smart form filling | **Yes** (combobox, React Select) | Native `<select>` only | Via AI | No | No |
+| Stable element refs | **Yes** (persist across snapshots) | Yes | No | No | No |
 | Network interception | **Yes** (mock/block/modify) | No | No | No | Read-only |
 | HTTP request mocking | **Yes** | No | No | No | No |
 | Cookie/storage management | **Yes** (full CRUD) | File-based | Cloud profiles | User data dir | No |
@@ -60,19 +86,22 @@ CDP Browser MCP Server connects to your **already-running** browser over a WebSo
 | PDF export | **Yes** | Yes | No | No | No |
 | File upload | **Yes** | Yes | No | No | No |
 | Drag & drop | **Yes** | Yes | No | No | No |
-| Console monitoring | **Yes** (auto-appended) | Yes | Limited | Yes | Yes |
+| Console monitoring | **Yes** | Yes | Limited | Yes | Yes |
 | Download tracking | **Yes** | No | No | No | No |
 | Framework-aware inputs | **Yes** (React/Angular/MUI) | Yes | Via AI | No | No |
+| JS-click fallback | **Yes** (auto for framework sites) | No | No | No | No |
 | Per-agent session isolation | **Yes** (exclusive tab locks) | Yes | Yes | No | No |
 | Tab ownership & locking | **Yes** (exclusive by default) | No | No | No | No |
 | Chrome profile/instance mgmt | **Yes** (detect, switch, list) | No | Cloud profiles | No | No |
-| Custom dropdown support | **Yes** (MUI/Ant/React Select) | Native | Via AI | No | No |
-| Modal/dialog guards | **Yes** | Yes | No | No | No |
-| Incremental snapshot diffs | **Yes** | Yes | No | No | No |
+| Modal/dialog guards | **Yes** (blocks with recovery) | Yes | No | No | No |
+| Snapshot caching | **Yes** (per-tab) | Yes | No | No | No |
+| Token-optimized snapshots | **Yes** (~15KB avg) | No | No | No | No |
+| Actionable error messages | **Yes** (17 types + fix tips) | Basic | No | No | No |
+| Auto-reconnect | **Yes** (exponential backoff) | N/A | N/A | No | No |
 | Requires paid service | **No** | No | Yes | No | No |
 | Requires LLM API key | **No** | No | Yes | No | No |
 | Dependencies | **2** (ws, MCP SDK) | Playwright + browsers | API key + subscription | Puppeteer + Chromium | 3-part install |
-| Single file server | **Yes** (~4600 lines) | Multi-file package | Multi-file package | Multi-file | Multi-file |
+| Architecture | **38 TypeScript modules** | Multi-file package | Multi-file package | Multi-file | Multi-file |
 | Status | **Active** | Active | Active | **Deprecated** | Active |
 | Startup speed | **Instant** (WebSocket connect) | Slow (browser launch) | Slow (cloud API) | Slow (3-5 min w/ tabs) | N/A |
 
@@ -114,9 +143,12 @@ google-chrome --remote-debugging-port=9222
 git clone https://github.com/Tushar49/cdp-browser-mcp-server.git
 cd cdp-browser-mcp-server/MCP\ Server
 npm install
+npm run build
 ```
 
 That's it. Two dependencies: `ws` (WebSocket client) and `@modelcontextprotocol/sdk`.
+
+> **Note:** The server auto-connects to your running browser on first tool call — no manual `browser.connect()` needed.
 
 ### Step 3: Configure Your MCP Client
 
@@ -130,7 +162,7 @@ Add to your `settings.json` or `mcp.json`:
   "mcpServers": {
     "cdp-browser": {
       "command": "node",
-      "args": ["/path/to/MCP Server/server.js"],
+      "args": ["/path/to/MCP Server/dist/index.js"],
       "env": {
         "CDP_PORT": "9222"
       }
@@ -151,7 +183,7 @@ Add to `claude_desktop_config.json`:
   "mcpServers": {
     "cdp-browser": {
       "command": "node",
-      "args": ["/path/to/MCP Server/server.js"],
+      "args": ["/path/to/MCP Server/dist/index.js"],
       "env": {
         "CDP_PORT": "9222"
       }
@@ -172,7 +204,7 @@ Add to `.cursor/mcp.json` in your project:
   "mcpServers": {
     "cdp-browser": {
       "command": "node",
-      "args": ["/path/to/MCP Server/server.js"]
+      "args": ["/path/to/MCP Server/dist/index.js"]
     }
   }
 }
@@ -184,12 +216,31 @@ Add to `.cursor/mcp.json` in your project:
 <summary><strong>Any MCP Client (stdio)</strong></summary>
 
 ```bash
-node "MCP Server/server.js"
+node "MCP Server/dist/index.js"
 ```
 
-The server communicates over stdio using the MCP protocol. Any MCP-compatible client can connect.
+The server communicates over stdio using the MCP protocol. Any MCP-compatible client can connect. Legacy `server.js` still works via `npm run start:legacy`.
 
 </details>
+
+---
+
+## Tools Overview
+
+| Tool | Actions | Description |
+|------|---------|-------------|
+| `tabs` | 6 | Tab management — list, find, open, close, activate, info |
+| `page` | 14 | Navigation, snapshots, screenshots, content extraction, PDF, dialogs |
+| `interact` | 12 | Click, hover, type, fill, select, press, drag, scroll, upload, focus, check, tap |
+| `form` | 1 | **NEW** — Smart form filling engine. Handles text, combobox, checkbox, radio, select, date in one call |
+| `execute` | 3 | JavaScript evaluation — expressions, async scripts, element-scoped calls |
+| `observe` | 6 | Console messages, network requests, performance metrics, downloads, HAR export |
+| `emulate` | 15 | Viewport, color scheme, geolocation, network throttling, timezone, vision deficiency |
+| `storage` | 6 | Cookie CRUD, storage clearing, quota inspection |
+| `intercept` | 6 | HTTP request interception — mock, modify, block network requests |
+| `cleanup` | 7 | Session management, disconnect, temp file cleanup, reset |
+| `browser` | 3 | Chrome/Edge/Brave instance detection, profile listing, connection switching |
+| `debug` | 21 | JS debugger, breakpoints, resource overrides, DOM/event breakpoints |
 
 ---
 
@@ -242,7 +293,24 @@ The server communicates over stdio using the MCP protocol. Any MCP-compatible cl
 | `check` | Toggle checkbox | `tabId`, `checked`, `uid` or `selector` | `timeout` |
 | `tap` | Tap element using touch events | `tabId`, `uid` or `selector` | `timeout` |
 
-**Global interact flags:** `autoSnapshot` (get before/after diff), `humanMode` (bezier mouse paths), `typoRate` (typing errors)
+**Global interact flags:** `humanMode` (bezier mouse paths), `typoRate` (typing errors)
+
+### `form` — Smart Form Filling *(NEW in v5.0.0)*
+
+Fill entire forms in a single call. Auto-detects field types and handles framework-specific inputs.
+
+| Parameter | Description | Required |
+|-----------|-------------|----------|
+| `tabId` | Target tab | Yes |
+| `fields` | Array of `{ uid, value, type? }` — type auto-detected if omitted | Yes |
+| `timeout` | Per-field timeout in ms (default: 10000) | No |
+
+**Supported field types:** `text`, `combobox`, `checkbox`, `radio`, `select`, `date`
+
+- **Combobox/React Select**: Types into the input, waits for dropdown, finds best match, selects it. Works with Greenhouse, Lever, MUI Autocomplete
+- **Checkbox/Radio**: Sets checked state based on value (`"true"` / `"false"`)
+- **Native `<select>`**: Selects option by visible text or value
+- **Date inputs**: Sets value via native input setter with proper event dispatch
 
 ### `execute` — JavaScript Execution
 
@@ -419,7 +487,7 @@ Multiple AI agents can share the same Chrome instance without interfering. Each 
 - **Tab origin tracking** — tabs opened via `tabs.new` are tagged `created`; pre-existing browser tabs first referenced by an agent are tagged `claimed`. On cleanup, **claimed tabs are never closed** — only detached. This protects the user's existing browser tabs from agent cleanup
 - Scoped tab visibility (agent A can't see agent B's tabs via `tabs.list`)
 - Independent console/network logs
-- **Configurable cleanup strategy** — `close` (default: removes created tabs on expiry), `detach` (keeps tabs open), or `none` (persist indefinitely)
+- **Configurable cleanup strategy** — `detach` (default: keeps tabs open on expiry), `close` (removes created tabs on expiry), or `none` (persist indefinitely)
 - **`cleanup.reset`** — master-clear that terminates all sessions. `closeTabs: true` closes agent-created tabs; pre-existing tabs are always preserved
 - TTL-based expiry with full CDP cleanup (default: 5 minutes, configurable via `CDP_SESSION_TTL`)
 - **Session ID security** — session UUIDs are treated as credentials and never returned in full in any output. All diagnostic messages truncate to first 8 characters, making impersonation computationally infeasible (2¹²² possibilities)
@@ -440,16 +508,6 @@ Set `humanMode: true` on any `interact` action for anti-detection mouse movement
 
 For typing, add `typoRate: 0.03` (3% chance per char) alongside `charDelay`/`wordDelay` — types adjacent QWERTY keys, pauses to "notice", then backspace-corrects.
 
-### Auto-Snapshot Diffing
-
-Set `autoSnapshot: true` on any `interact` action to automatically:
-1. Take an accessibility snapshot **before** the action
-2. Execute the action
-3. Take a snapshot **after** the action
-4. Return a **line-level diff** appended to the response
-
-If the action triggers navigation, shows the new page snapshot instead of a diff. Works independently of `humanMode`.
-
 ### Chrome Profile & Instance Management
 
 The `browser` tool detects all running Chrome instances (Chrome, Beta, Canary, Chromium) by scanning for `DevToolsActivePort` files. It reads `Local State` for profile names and emails.
@@ -459,15 +517,11 @@ The `browser` tool detects all running Chrome instances (Chrome, Beta, Canary, C
 - **`browser.active`** — show current instance info, profiles, health, tabs per profile context
 - **`tabs.new` with `profile`** — create tabs in a specific profile by name, email, or directory (e.g. `profile: "Work"`)
 - **`tabs.info`** shows `browserContextId` for profile identification
-- Set `CDP_PROFILE` env var to auto-connect at startup
+- Set `CDP_PROFILE` env var to auto-connect to a matching Chrome instance on first tool call
 
 ### Modal/Dialog Guards
 
 If a JavaScript `alert`, `confirm`, or `prompt` is pending on a tab, the server blocks all actions except `page.dialog` and returns a clear message telling the agent to handle the dialog first.
-
-### Console Error Auto-Reporting
-
-Every tool response automatically includes the last 5 console errors/warnings from the page. No need to separately poll `observe.console` to debug failures.
 
 ### Smart Error Messages
 
@@ -488,59 +542,76 @@ WebSocket ping/pong every 30 seconds. If 2 consecutive pings fail, the connectio
 |----------|---------|-------------|
 | `CDP_HOST` | `127.0.0.1` | Chrome DevTools Protocol host |
 | `CDP_PORT` | `9222` | Chrome DevTools Protocol port |
-| `CDP_TIMEOUT` | `30000` | Command timeout in milliseconds |
+| `CDP_TIMEOUT` | `60000` | Global command timeout in milliseconds |
+| `CDP_ACTION_TIMEOUT` | `10000` | Element action timeout (click, type, wait, etc.) in milliseconds |
+| `CDP_NAVIGATION_TIMEOUT` | `60000` | Page navigation timeout in milliseconds |
+| `CDP_SNAPSHOT_TIMEOUT` | `15000` | Accessibility snapshot timeout in milliseconds |
 | `CDP_SESSION_TTL` | `300000` | Agent session TTL in milliseconds (5 min) |
-| `CDP_PROFILE` | — | Auto-connect to Chrome instance by name or User Data path |
-| `CDP_USER_DATA` | — | Custom Chrome User Data directory path |
 | `CDP_DEBUGGER_TIMEOUT` | `30000` | Debugger auto-resume timeout in milliseconds |
-| `CDP_TEMP_DIR` | `.temp` | Directory for temp files (screenshots, PDFs) |
+| `CDP_CLEANUP_STRATEGY` | `detach` | Default tab cleanup strategy: `close`, `detach`, or `none` |
+| `CDP_TEMP_DIR` | *(cwd)/.temp* | Directory for temp files (screenshots, PDFs). Resolved at runtime from cwd if empty |
+| `CDP_PROFILE` | — | Auto-connect to Chrome instance by name or User Data path on first tool call (lazy, not at startup) |
 
 ---
 
 ## Architecture
 
 ```
-                        ┌─────────────────────────────┐
-                        │     Your Chrome Browser      │
-                        │  (cookies, sessions, ext.)   │
-                        │                              │
-                        │   ws://localhost:9222/       │
-                        │   devtools/browser/{id}      │
-                        └──────────────┬──────────────┘
-                                       │ Single browser-level WebSocket
-                                       │
-                        ┌──────────────┴──────────────┐
-                        │   CDP Browser MCP Server     │
-                        │         (server.js)          │
-                        │                              │
-                        │  ┌─ Tab A session ──────┐   │
-                        │  │  console, network,    │   │
-                        │  │  dialogs, downloads   │   │
-                        │  └──────────────────────┘   │
-                        │  ┌─ Tab B session ──────┐   │
-                        │  │  console, network,    │   │
-                        │  │  dialogs, downloads   │   │
-                        │  └──────────────────────┘   │
-                        │        ...per tab...         │
-                        │                              │
-                        │  ┌─ Agent Sessions ─────┐   │
-                        │  │  agent-1 → [Tab A]    │   │
-                        │  │  agent-2 → [Tab B, C] │   │
-                        │  └──────────────────────┘   │
-                        └──────────────┬──────────────┘
-                                       │ stdio (MCP protocol)
-                                       │
-                        ┌──────────────┴──────────────┐
-                        │       MCP Client             │
-                        │  (VS Code, Claude, Cursor)   │
-                        └─────────────────────────────┘
+MCP Server/
+├── server.js                    # Legacy entry point (npm run start:legacy)
+├── src/
+│   ├── index.ts                 # Main entry point
+│   ├── config.ts                # Environment variables & constants
+│   ├── types.ts                 # Shared type definitions
+│   ├── connection/
+│   │   ├── cdp-client.ts        # WebSocket CDP client
+│   │   ├── browser-discovery.ts # Auto-detect Chrome/Edge/Brave
+│   │   ├── domain-manager.ts    # Lazy CDP domain enablement
+│   │   ├── health-monitor.ts    # Ping/pong + auto-reconnect
+│   │   └── tab-session-service.ts # Per-tab CDP session pooling
+│   ├── session/
+│   │   ├── session-manager.ts   # Agent session lifecycle & TTL
+│   │   ├── tab-ownership.ts     # Exclusive tab locks & tracking
+│   │   └── modal-state.ts       # Dialog/file-chooser blocking
+│   ├── snapshot/
+│   │   ├── accessibility.ts     # Full AX tree capture
+│   │   ├── element-resolver.ts  # Stable uid ↔ backendNodeId mapping
+│   │   ├── cache.ts             # Per-tab snapshot caching + diffs
+│   │   └── token-optimizer.ts   # Role filtering, depth limits, truncation
+│   ├── tools/
+│   │   ├── dispatch.ts          # Preprocessing (session, tab, modal checks)
+│   │   ├── registry.ts          # Tool registration
+│   │   ├── base-tool.ts         # Shared tool utilities
+│   │   ├── tabs.ts              # Tab management
+│   │   ├── page.ts              # Navigation, snapshots, content
+│   │   ├── interact.ts          # Element interaction
+│   │   ├── form.ts              # Smart form filling (NEW)
+│   │   ├── execute.ts           # JavaScript execution
+│   │   ├── observe.ts           # Console, network, performance
+│   │   ├── emulate.ts           # Device & network emulation
+│   │   ├── storage.ts           # Cookie & storage management
+│   │   ├── intercept.ts         # HTTP request interception
+│   │   ├── cleanup.ts           # Session management
+│   │   ├── browser.ts           # Browser instance management
+│   │   └── debug.ts             # JS debugger & resource overrides
+│   └── utils/
+│       ├── error-handler.ts     # 17 error types with fix suggestions
+│       ├── response-builder.ts  # Progressive truncation for LLMs
+│       ├── helpers.ts           # Shared utilities
+│       ├── retry.ts             # Auto-retry with backoff
+│       ├── wait.ts              # Wait-for-completion helpers
+│       └── temp-files.ts        # Session-scoped temp file management
+└── dist/                        # Compiled output (npm run build)
 ```
 
 **Key design decisions:**
 
 - **Browser-level WebSocket** — single connection multiplexes all tabs via `Target.attachToTarget`
 - **Lazy tab attachment** — tabs are only attached when you interact with them, not on startup
+- **Lazy domain enablement** — CDP domains (DOM, Network, etc.) enabled on first use per tab
 - **Per-tab state isolation** — each attached tab gets independent console logs, network captures, dialog tracking, and download monitoring
+- **Auto-connect** — browser discovered and connected on first tool call, no manual step needed
+- **Connection mutex** — prevents concurrent WebSocket opens during auto-connect
 - **No browser enumeration** — works with 50+ tabs without performance degradation
 - **Direct CDP** — no abstraction layer (Playwright/Puppeteer), full protocol access
 
@@ -560,11 +631,13 @@ WebSocket ping/pong every 30 seconds. If 2 consecutive pings fail, the connectio
 
 ```
 1. page.snapshot → find form fields with ref numbers
-2. interact.fill → { fields: [
-     { uid: 10, value: "John", type: "text" },
-     { uid: 12, value: "john@email.com", type: "text" },
-     { uid: 14, value: "Option A", type: "select" }
+2. form.fill → { tabId: "...", fields: [
+     { uid: 10, value: "John" },
+     { uid: 12, value: "john@email.com" },
+     { uid: 14, value: "Engineering", type: "combobox" },
+     { uid: 16, value: "true", type: "checkbox" }
    ]}
+   → auto-detects field types, handles React selects
 3. interact.click → { uid: 20 }  // Submit button
    → auto-waits for XHR to complete
 ```
@@ -614,7 +687,7 @@ WebSocket ping/pong every 30 seconds. If 2 consecutive pings fail, the connectio
 ## FAQ
 
 **Q: Does this require Playwright or Puppeteer?**  
-A: No. It connects directly to Chrome via CDP WebSocket. Only dependencies are `ws` and `@modelcontextprotocol/sdk`.
+A: No. It connects directly to Chrome via CDP WebSocket. Only dependencies are `ws` and `@modelcontextprotocol/sdk`. Built as 38 TypeScript modules compiled to JS.
 
 **Q: Can multiple AI agents use it simultaneously?**  
 A: Yes. Each agent process is automatically assigned an isolated session — no configuration needed. Sessions auto-expire after 5 minutes. Pass a custom `sessionId` to reconnect to a previous session.
