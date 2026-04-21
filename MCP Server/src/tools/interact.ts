@@ -105,38 +105,6 @@ export async function jsClickElement(
   }, sessionId);
 }
 
-/**
- * Install a MutationObserver + navigation listener on the page and return
- * a JS expression that resolves to true if any DOM mutation or navigation
- * occurred. The observer is cleaned up automatically.
- */
-async function installClickEffectDetector(ctx: ServerContext, sess: string): Promise<void> {
-  await ctx.sendCommand('Runtime.evaluate', {
-    expression: `(() => {
-      window.__cdpClickDetected = false;
-      const obs = new MutationObserver(() => { window.__cdpClickDetected = true; obs.disconnect(); });
-      obs.observe(document.body, { childList: true, subtree: true, attributes: true });
-      window.__cdpClickObserver = obs;
-      window.__cdpClickOrigUrl = location.href;
-    })()`,
-    returnByValue: true,
-  }, sess);
-}
-
-async function checkClickEffect(ctx: ServerContext, sess: string): Promise<boolean> {
-  const result = await ctx.sendCommand('Runtime.evaluate', {
-    expression: `(() => {
-      const detected = window.__cdpClickDetected || location.href !== window.__cdpClickOrigUrl;
-      if (window.__cdpClickObserver) { window.__cdpClickObserver.disconnect(); delete window.__cdpClickObserver; }
-      delete window.__cdpClickDetected;
-      delete window.__cdpClickOrigUrl;
-      return detected;
-    })()`,
-    returnByValue: true,
-  }, sess) as { result: { value: boolean } };
-  return !!result.result.value;
-}
-
 async function handleClick(ctx: ServerContext, args: InteractArgs): Promise<ToolResult> {
   const sess = await getTabSession(ctx, args.tabId);
   const retryTimeout = args.timeout || 5000;
@@ -155,7 +123,7 @@ async function handleClick(ctx: ServerContext, args: InteractArgs): Promise<Tool
   // Force JS click — skip CDP mouse events entirely
   if (args.jsClick) {
     await jsClickElement(ctx, resolvedSession, node.backendNodeId);
-    return ok(`JS-clicked <${el.tag}> "${el.label}" at (${Math.round(el.x)}, ${Math.round(el.y)})`);
+    return ok(`Clicked (JS) <${el.tag}> "${el.label}" at (${Math.round(el.x)}, ${Math.round(el.y)})`);
   }
 
   const button = args.button || 'left';
@@ -164,46 +132,41 @@ async function handleClick(ctx: ServerContext, args: InteractArgs): Promise<Tool
   const buttons = buttonsMap[button] || 1;
   const mods = modifierFlags(args.modifiers);
 
-  // Install click-effect detector before dispatching CDP events
-  await installClickEffectDetector(ctx, sess);
-
-  if (args.humanMode) {
-    // Human-like: bezier curve mouse path with overshoot and jitter
-    const path = generateBezierPath({ x: 0, y: 0 }, { x: el.x, y: el.y });
-    for (let i = 0; i < path.length; i++) {
+  // P0-5: No automatic MutationObserver detection — CDP click only,
+  // with JS fallback on CDP error (not on "no effect" heuristic)
+  try {
+    if (args.humanMode) {
+      // Human-like: bezier curve mouse path with overshoot and jitter
+      const path = generateBezierPath({ x: 0, y: 0 }, { x: el.x, y: el.y });
+      for (let i = 0; i < path.length; i++) {
+        await ctx.sendCommand('Input.dispatchMouseEvent', {
+          type: 'mouseMoved', x: path[i].x, y: path[i].y, modifiers: mods,
+        }, sess);
+        const progress = i / path.length;
+        const moveDelay = progress > 0.7 ? 15 + Math.random() * 20 : 5 + Math.random() * 10;
+        await sleep(moveDelay);
+      }
+      await sleep(30 + Math.random() * 50); // pre-click hesitation
+    } else {
       await ctx.sendCommand('Input.dispatchMouseEvent', {
-        type: 'mouseMoved', x: path[i].x, y: path[i].y, modifiers: mods,
+        type: 'mouseMoved', x: el.x, y: el.y, modifiers: mods,
       }, sess);
-      const progress = i / path.length;
-      const moveDelay = progress > 0.7 ? 15 + Math.random() * 20 : 5 + Math.random() * 10;
-      await sleep(moveDelay);
+      await sleep(50);
     }
-    await sleep(30 + Math.random() * 50); // pre-click hesitation
-  } else {
+
     await ctx.sendCommand('Input.dispatchMouseEvent', {
-      type: 'mouseMoved', x: el.x, y: el.y, modifiers: mods,
+      type: 'mousePressed', x: el.x, y: el.y, button, clickCount: clicks, buttons, modifiers: mods,
     }, sess);
-    await sleep(50);
-  }
+    await ctx.sendCommand('Input.dispatchMouseEvent', {
+      type: 'mouseReleased', x: el.x, y: el.y, button, clickCount: clicks, modifiers: mods,
+    }, sess);
 
-  await ctx.sendCommand('Input.dispatchMouseEvent', {
-    type: 'mousePressed', x: el.x, y: el.y, button, clickCount: clicks, buttons, modifiers: mods,
-  }, sess);
-  await ctx.sendCommand('Input.dispatchMouseEvent', {
-    type: 'mouseReleased', x: el.x, y: el.y, button, clickCount: clicks, modifiers: mods,
-  }, sess);
-
-  // Wait briefly then check if the CDP click had any observable effect
-  await sleep(200);
-  const hadEffect = await checkClickEffect(ctx, sess);
-
-  if (!hadEffect) {
-    // CDP click didn't trigger anything — fall back to JS el.click()
+    return ok(`Clicked <${el.tag}> "${el.label}" at (${Math.round(el.x)}, ${Math.round(el.y)})`);
+  } catch {
+    // CDP click failed (element not interactable) — fallback to JS click
     await jsClickElement(ctx, resolvedSession, node.backendNodeId);
-    return ok(`Clicked <${el.tag}> "${el.label}" at (${Math.round(el.x)}, ${Math.round(el.y)}) (JS fallback)`);
+    return ok(`Clicked (JS fallback) <${el.tag}> "${el.label}" at (${Math.round(el.x)}, ${Math.round(el.y)})`);
   }
-
-  return ok(`Clicked <${el.tag}> "${el.label}" at (${Math.round(el.x)}, ${Math.round(el.y)})`);
 }
 
 async function handleHover(ctx: ServerContext, args: InteractArgs): Promise<ToolResult> {
@@ -989,12 +952,12 @@ const INTERACT_ACTIONS: Record<string, (ctx: ServerContext, args: InteractArgs) 
 const INTERACT_DESCRIPTION = [
   'Element interaction. Always take a snapshot first to get uid refs.',
   '',
-  "Click automatically falls back to JavaScript click if CDP mouse events don't work (LinkedIn, React portals). Set jsClick: true to force JS click.",
+  "Click falls back to JavaScript click only when CDP mouse events fail (element not interactable). Set jsClick: true to force JS click for sites like LinkedIn or React portals.",
   '',
   "For form filling, prefer the 'fill' action which handles multiple fields in one call — pass an array of {uid, value, type} objects instead of separate type/wait/snapshot/click sequences.",
   '',
   'Operations:',
-  '- click: Click an element. Auto-falls back to JS click if CDP events fail (requires: tabId, uid or selector; optional: button[left|right|middle], clickCount — use 2 for double-click, modifiers[Control|Shift|Alt|Meta], jsClick, timeout)',
+  '- click: Click an element. Falls back to JS click on CDP failure (requires: tabId, uid or selector; optional: button[left|right|middle], clickCount — use 2 for double-click, modifiers[Control|Shift|Alt|Meta], jsClick, timeout)',
   '- hover: Hover over an element to trigger tooltips or menus (requires: tabId, uid or selector; optional: modifiers[Control|Shift|Alt|Meta], timeout)',
   '- type: Type text into a focused input field (requires: tabId, text, uid or selector; optional: clear[default:true] — clears field first, submit — press Enter after typing, delay — fixed ms between keystrokes, charDelay — base ms between chars with randomized range [base, base*3] default 200ms, wordDelay — base ms between words with randomized range [base, base*3] default 800ms, timeout)',
   '- fill: Fill multiple form fields in one call (requires: tabId, fields — array of {uid or selector, value, type[text|checkbox|radio|select]}; optional: timeout)',

@@ -8,6 +8,7 @@ export type { ConnectionState, CDPClientOptions } from './cdp-client.js';
 export {
   discoverBrowserInstances,
   resolveWsUrl,
+  resolveWsUrlAsync,
   findBestInstance,
 } from './browser-discovery.js';
 export type { DiscoverOptions, WsUrlResult } from './browser-discovery.js';
@@ -18,3 +19,7 @@ export type {
   HealthState,
   HealthMonitorOptions,
 } from './health-monitor.js';
+
+export { DomainManager } from './domain-manager.js';
+
+export { TabSessionService } from './tab-session-service.js';

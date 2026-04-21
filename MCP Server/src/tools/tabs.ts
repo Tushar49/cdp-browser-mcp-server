@@ -30,7 +30,7 @@ async function handleList(
   let autoShowAll = false;
   if (!showAll && sessionId) {
     const ownedCount = tabs.filter(
-      (t) => ctx.tabLocks.get(t.targetId as string)?.sessionId === sessionId,
+      (t) => ctx.tabOwnership.getLock(t.targetId as string)?.sessionId === sessionId,
     ).length;
     if (ownedCount === 0) {
       showAll = true;
@@ -43,7 +43,7 @@ async function handleList(
     const title = t.title as string;
     const url = t.url as string;
 
-    const lock = ctx.tabLocks.get(targetId);
+    const lock = ctx.tabOwnership.getLock(targetId);
     const lockTag =
       lock?.sessionId && lock.sessionId !== sessionId
         ? ` [locked by: ${lock.sessionId.substring(0, 8)}…]`
@@ -85,7 +85,7 @@ async function handleFind(
     const title = t.title as string;
     const url = t.url as string;
 
-    const lock = ctx.tabLocks.get(targetId);
+    const lock = ctx.tabOwnership.getLock(targetId);
     const lockTag =
       lock?.sessionId && lock.sessionId !== sessionId
         ? ` [locked by: ${lock.sessionId.substring(0, 8)}…]`
@@ -230,7 +230,7 @@ async function handleNew(
   const sessionId = args._agentSessionId as string | undefined;
   if (session && sessionId) {
     session.tabIds.add(targetId);
-    ctx.tabLocks.set(targetId, { sessionId, origin: 'created' });
+    ctx.tabOwnership.lock(targetId, sessionId, true, 'created');
   }
 
   // Phase 2: Attach CDP session to the new tab
@@ -292,7 +292,7 @@ async function handleClose(
   const tabId = args.tabId as string | undefined;
   if (!tabId) return fail("Provide 'tabId' to close.");
 
-  const lock = ctx.tabLocks.get(tabId);
+  const lock = ctx.tabOwnership.getLock(tabId);
   const sessionId = args._agentSessionId as string | undefined;
   if (lock?.sessionId && lock.sessionId !== sessionId) {
     return fail(
@@ -301,7 +301,7 @@ async function handleClose(
   }
 
   // Detach CDP session if attached, then close the target
-  ctx.tabLocks.delete(tabId);
+  ctx.tabOwnership.release(tabId);
   await ctx.sendCommand('Target.closeTarget', { targetId: tabId });
   return ok('Tab closed.');
 }

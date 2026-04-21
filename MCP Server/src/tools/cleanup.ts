@@ -21,7 +21,7 @@ async function handleDisconnectTab(
   if (!tabId) return fail("Provide 'tabId'.");
 
   const sessionId = args._agentSessionId as string | undefined;
-  const lock = ctx.tabLocks.get(tabId);
+  const lock = ctx.tabOwnership.getLock(tabId);
   if (lock?.sessionId && lock.sessionId !== sessionId) {
     return fail(
       `Tab [${tabId}] is locked by another session. Cannot disconnect.`,
@@ -29,7 +29,7 @@ async function handleDisconnectTab(
   }
 
   // Release the tab lock (CDP session detach will be handled by the caller/context)
-  ctx.tabLocks.delete(tabId);
+  ctx.tabOwnership.release(tabId);
   return ok('Detached from tab.');
 }
 
@@ -41,9 +41,9 @@ async function handleDisconnectAll(
   let count = 0;
   let skipped = 0;
 
-  for (const [tabId, lock] of ctx.tabLocks.entries()) {
+  for (const [tabId, lock] of ctx.tabOwnership.entries()) {
     if (!lock.sessionId || lock.sessionId === sessionId) {
-      ctx.tabLocks.delete(tabId);
+      ctx.tabOwnership.release(tabId);
       count++;
     } else {
       skipped++;
@@ -105,7 +105,7 @@ async function handleListSessions(
   const ttl = ctx.config.sessionTTL;
   const sections: string[] = [];
 
-  for (const [id, s] of ctx.sessions) {
+  for (const [id, s] of ctx.sessions.entries()) {
     const age = ((now - s.lastActivity) / 1000).toFixed(0);
     const remaining = Math.max(
       0,
@@ -113,7 +113,7 @@ async function handleListSessions(
     ).toFixed(0);
 
     const ownedTabs = [...s.tabIds].filter(
-      (tid) => ctx.tabLocks.get(tid)?.sessionId === id,
+      (tid) => ctx.tabOwnership.getLock(tid)?.sessionId === id,
     );
 
     let section =
@@ -125,7 +125,7 @@ async function handleListSessions(
     if (ownedTabs.length) {
       for (const tid of ownedTabs) {
         const tab = tabMap.get(tid);
-        const lock = ctx.tabLocks.get(tid);
+        const lock = ctx.tabOwnership.getLock(tid);
         const originTag = lock ? ` (${lock.origin})` : '';
         section += `\n    [${tid}]${originTag} ${tab ? tab.url : '(unknown)'}`;
       }
@@ -157,27 +157,27 @@ async function handleSession(
   let cleaned = 0;
 
   for (const tid of session.tabIds) {
-    const lock = ctx.tabLocks.get(tid);
+    const lock = ctx.tabOwnership.getLock(tid);
     if (!lock || lock.sessionId !== sid) continue; // skip borrowed
 
     if (lock.origin === 'claimed') {
       // Pre-existing tabs: release lock + detach, never close
-      ctx.tabLocks.delete(tid);
+      ctx.tabOwnership.release(tid);
       cleaned++;
     } else {
       // Created tabs: apply cleanup strategy
       if (strategy === 'none') {
-        ctx.tabLocks.delete(tid);
+        ctx.tabOwnership.release(tid);
       } else if (strategy === 'close') {
         try {
           await ctx.sendCommand('Target.closeTarget', { targetId: tid });
         } catch {
           /* ok */
         }
-        ctx.tabLocks.delete(tid);
+        ctx.tabOwnership.release(tid);
       } else {
         // detach
-        ctx.tabLocks.delete(tid);
+        ctx.tabOwnership.release(tid);
       }
       cleaned++;
     }
@@ -206,14 +206,14 @@ async function handleReset(
   let detachedCount = 0;
   let preservedCount = 0;
 
-  for (const [id, s] of ctx.sessions) {
+  for (const [id, s] of ctx.sessions.entries()) {
     for (const tid of s.tabIds) {
-      const lock = ctx.tabLocks.get(tid);
+      const lock = ctx.tabOwnership.getLock(tid);
       if (!lock || lock.sessionId !== id) continue;
 
       if (lock.origin === 'claimed') {
         // NEVER close pre-existing tabs
-        ctx.tabLocks.delete(tid);
+        ctx.tabOwnership.release(tid);
         preservedCount++;
       } else if (lock.origin === 'created' && closeTabs) {
         try {
@@ -221,10 +221,10 @@ async function handleReset(
         } catch {
           /* ok */
         }
-        ctx.tabLocks.delete(tid);
+        ctx.tabOwnership.release(tid);
         closedCount++;
       } else {
-        ctx.tabLocks.delete(tid);
+        ctx.tabOwnership.release(tid);
         detachedCount++;
       }
     }
@@ -233,7 +233,7 @@ async function handleReset(
 
   const sessionCount = ctx.sessions.size;
   ctx.sessions.clear();
-  ctx.tabLocks.clear();
+  ctx.tabOwnership.clear();
 
   return ok(
     `Reset complete. ${sessionCount} session(s) cleared.\n` +
@@ -276,7 +276,7 @@ async function handleStatus(
   let sessionSummary = `Agent sessions: ${ctx.sessions.size}`;
   if (ctx.sessions.size > 0) {
     sessionSummary += `\nSession TTL: ${ttl / 1000}s`;
-    for (const [id, s] of ctx.sessions) {
+    for (const [id, s] of ctx.sessions.entries()) {
       const remaining = Math.max(0, ttl - (now - s.lastActivity));
       const remainingSec = Math.round(remaining / 1000);
       const tabCount = s.tabIds.size;

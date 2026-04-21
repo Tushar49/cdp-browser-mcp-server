@@ -8,7 +8,13 @@
 
 import type { CDPClient } from './connection/cdp-client.js';
 import type { HealthMonitor } from './connection/health-monitor.js';
+import type { DomainManager } from './connection/domain-manager.js';
+import type { TabSessionService } from './connection/tab-session-service.js';
+import type { SessionManager } from './session/session-manager.js';
+import type { TabOwnership } from './session/tab-ownership.js';
 import type { ModalStateManager } from './session/modal-state.js';
+import type { SnapshotCache } from './snapshot/cache.js';
+import type { ElementResolver } from './snapshot/element-resolver.js';
 
 // ─── Cleanup Strategy ───────────────────────────────────────────────
 
@@ -175,18 +181,30 @@ export interface ServerContext {
   /** Connection health monitor with auto-reconnect. */
   healthMonitor: HealthMonitor;
 
+  /** Lazy CDP domain enablement manager. */
+  domainManager: DomainManager;
+
   /** Send a CDP command and await its result. */
   sendCommand: (method: string, params?: Record<string, unknown>, sessionId?: string) => Promise<unknown>;
 
-  /** Map of agent session IDs → session metadata. */
-  sessions: Map<string, SessionInfo>;
+  /** Shared per-tab CDP session management. */
+  tabSessions: TabSessionService;
 
-  /** Map of tab target IDs → locking info. */
-  tabLocks: Map<string, { sessionId: string; origin: 'created' | 'claimed' }>;
+  /** Agent session lifecycle manager. */
+  sessions: SessionManager;
+
+  /** Tab ownership and locking for multi-agent isolation. */
+  tabOwnership: TabOwnership;
 
   /** Tracks tab-level modal states (dialogs, file choosers, debugger pauses). */
   modalStates: ModalStateManager;
 
   /** Per-process fallback session ID. */
   processSessionId: string;
+
+  /** Snapshot cache for incremental/diff snapshots. */
+  snapshotCache: SnapshotCache;
+
+  /** Per-tab ElementResolver for stable uid refs across snapshots. */
+  elementResolvers: Map<string, ElementResolver>;
 }

@@ -106,13 +106,22 @@ async function handleConnect(
 
   // Clear caller's session state — tabs from old browser are invalid
   ctx.sessions.clear();
-  ctx.tabLocks.clear();
+  ctx.tabOwnership.clear();
+  ctx.elementResolvers.clear();
+
+  // P1-4: Suppress auto-reconnect during browser switch
+  ctx.healthMonitor.suppressAutoReconnect = true;
 
   // Disconnect current browser
   await ctx.cdpClient.disconnect();
 
   // Connect to new instance
-  await ctx.cdpClient.connect(target.wsUrl);
+  try {
+    await ctx.cdpClient.connect(target.wsUrl);
+    ctx.healthMonitor.onConnected();
+  } finally {
+    ctx.healthMonitor.suppressAutoReconnect = false;
+  }
 
   return ok(
     `Connected to ${target.name}\nPort: ${target.port}\nUser Data: ${target.userDataDir}\n` +

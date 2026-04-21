@@ -133,7 +133,8 @@ export function discoverBrowserInstances(
 
 /**
  * Resolve the WebSocket URL by scanning known User Data directories
- * for a DevToolsActivePort file. Falls back to `host:port`.
+ * for a DevToolsActivePort file. Falls back to querying /json/version
+ * on the fallback host:port (P0-3).
  *
  * @param overrideDir   User Data dir override (e.g. from `browser.connect`)
  * @param fallbackHost  Default host (from config)
@@ -160,10 +161,43 @@ export function resolveWsUrl(
     }
   }
 
+  // P0-3: Last resort — construct URL (caller should try /json/version at runtime)
   return {
     wsUrl: `ws://${fallbackHost}:${fallbackPort}/devtools/browser/`,
     userDataDir: null,
   };
+}
+
+/**
+ * Async variant that queries /json/version when file-based discovery fails.
+ * P0-3 fix: Uses the HTTP endpoint to get the correct WebSocket URL
+ * instead of guessing.
+ */
+export async function resolveWsUrlAsync(
+  overrideDir: string | null,
+  fallbackHost: string,
+  fallbackPort: number,
+): Promise<WsUrlResult> {
+  // Try synchronous file-based discovery first
+  const syncResult = resolveWsUrl(overrideDir, fallbackHost, fallbackPort);
+  if (syncResult.userDataDir) return syncResult;
+
+  // File-based discovery failed — try HTTP /json/version endpoint
+  try {
+    const resp = await fetch(`http://${fallbackHost}:${fallbackPort}/json/version`);
+    const data = (await resp.json()) as { webSocketDebuggerUrl?: string };
+    if (data.webSocketDebuggerUrl) {
+      return {
+        wsUrl: data.webSocketDebuggerUrl,
+        userDataDir: null,
+      };
+    }
+  } catch {
+    // /json/version unavailable — fall through
+  }
+
+  // Last resort — constructed URL (may not work)
+  return syncResult;
 }
 
 /**

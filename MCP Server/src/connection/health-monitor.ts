@@ -12,6 +12,7 @@ import type { CDPClient } from './cdp-client.js';
 import {
   discoverBrowserInstances,
   resolveWsUrl,
+  resolveWsUrlAsync,
   findBestInstance,
 } from './browser-discovery.js';
 
@@ -58,6 +59,10 @@ export class HealthMonitor {
   private client: CDPClient;
   private timer: ReturnType<typeof setInterval> | null = null;
   private reconnectAttempts = 0;
+  private connectPromise: Promise<void> | null = null;
+
+  /** When true, onDisconnect() skips auto-reconnect (P1-4: browser.connect race). */
+  suppressAutoReconnect = false;
 
   // Options (with defaults)
   private pingIntervalMs: number;
@@ -128,6 +133,9 @@ export class HealthMonitor {
   async onDisconnect(): Promise<boolean> {
     this.stop();
 
+    // P1-4: browser.connect suppresses auto-reconnect during switch
+    if (this.suppressAutoReconnect) return false;
+
     while (this.reconnectAttempts < this.maxReconnectAttempts) {
       this.reconnectAttempts++;
       const delay =
@@ -136,7 +144,7 @@ export class HealthMonitor {
       await this._sleep(delay);
 
       try {
-        const { wsUrl } = resolveWsUrl(
+        const { wsUrl } = await resolveWsUrlAsync(
           this.overrideUserDataDir,
           this.cdpHost,
           this.cdpPort,
@@ -161,6 +169,20 @@ export class HealthMonitor {
     // Already connected — nothing to do
     if (this.client.isConnected) return;
 
+    // P0-2: Connection mutex — wait for in-flight connect
+    if (this.connectPromise) return this.connectPromise;
+
+    this.connectPromise = this._doAutoConnect();
+    try {
+      await this.connectPromise;
+    } finally {
+      this.connectPromise = null;
+    }
+  }
+
+  /** Internal auto-connect implementation. */
+  private async _doAutoConnect(): Promise<void> {
+
     // If a preferred profile is configured, try to match it
     if (this.preferredProfile) {
       const instances = discoverBrowserInstances({ skipProfiles: true });
@@ -170,7 +192,8 @@ export class HealthMonitor {
       }
     }
 
-    const { wsUrl } = resolveWsUrl(
+    // P0-3: Use async resolve to try /json/version when file discovery fails
+    const { wsUrl } = await resolveWsUrlAsync(
       this.overrideUserDataDir,
       this.cdpHost,
       this.cdpPort,

@@ -383,7 +383,7 @@ async function fillText(
  * 2. Clear existing value
  * 3. Type value char-by-char with 50ms delay (triggers React search)
  * 4. Wait up to 3s for dropdown options to appear (poll AX tree for option roles)
- * 5. Find best matching option (case-insensitive startsWith, then includes, then fuzzy)
+ * 5. Find best matching option — scoped to aria-controls/aria-owns listbox first (P1-3)
  * 6. Click the best match option
  * 7. If no match found, try pressing Enter (some comboboxes accept free text)
  * 8. Return what was selected or error with available options
@@ -424,6 +424,20 @@ async function fillCombobox(
     await sleep(50);
   }
 
+  // P1-3: Get the combobox's aria-controls/aria-owns to scope option search
+  let controlledListboxId: string | null = null;
+  try {
+    const controlsResult = await ctx.sendCommand('Runtime.callFunctionOn', {
+      functionDeclaration: `function() {
+        return this.getAttribute('aria-controls') || this.getAttribute('aria-owns') || '';
+      }`,
+      objectId,
+      returnByValue: true,
+    }, sess) as { result: { value: string } };
+    const controlsId = controlsResult?.result?.value;
+    if (controlsId) controlledListboxId = controlsId;
+  } catch { /* best-effort */ }
+
   // 4. Wait for dropdown options to appear (poll AX tree)
   const optionTexts: string[] = [];
   let matchedOption: { text: string; backendNodeId: number } | null = null;
@@ -448,8 +462,71 @@ async function fillCombobox(
     optionTexts.length = 0;
     const candidates: Array<{ text: string; backendNodeId: number }> = [];
 
+    // P1-3: If we have a controlled listbox ID, find it and scope to its children
+    let scopedNodeIds: Set<string> | null = null;
+    if (controlledListboxId) {
+      // Find the listbox node whose backendDOMNodeId maps to the controlled element
+      const listboxNode = nodes.find(n => {
+        if (n.ignored) return false;
+        const role = n.role?.value;
+        if (role !== 'listbox' && role !== 'menu' && role !== 'tree' && role !== 'grid') return false;
+        // Check properties for the matching DOM id
+        if (n.properties) {
+          for (const p of n.properties) {
+            if (p.name === 'id' && p.value?.value === controlledListboxId) return true;
+          }
+        }
+        return false;
+      });
+
+      if (listboxNode) {
+        // Collect all descendant nodeIds of this listbox
+        scopedNodeIds = new Set<string>();
+        const collectChildren = (nodeId: string) => {
+          scopedNodeIds!.add(nodeId);
+          const nd = nodes.find(n => n.nodeId === nodeId);
+          for (const childId of nd?.childIds || []) {
+            collectChildren(childId);
+          }
+        };
+        for (const childId of listboxNode.childIds || []) {
+          collectChildren(childId);
+        }
+      }
+    }
+
+    // If no scoped listbox found via aria-controls, try to find the nearest expanded popup
+    if (!scopedNodeIds) {
+      const expandedListbox = nodes.find(n => {
+        if (n.ignored) return false;
+        const role = n.role?.value;
+        if (role !== 'listbox' && role !== 'menu' && role !== 'tree') return false;
+        // Check if expanded
+        const expandedProp = n.properties?.find(p => p.name === 'expanded');
+        return expandedProp?.value?.value === true;
+      });
+
+      if (expandedListbox) {
+        scopedNodeIds = new Set<string>();
+        const collectChildren = (nodeId: string) => {
+          scopedNodeIds!.add(nodeId);
+          const nd = nodes.find(n => n.nodeId === nodeId);
+          for (const childId of nd?.childIds || []) {
+            collectChildren(childId);
+          }
+        };
+        for (const childId of expandedListbox.childIds || []) {
+          collectChildren(childId);
+        }
+      }
+    }
+
     for (const node of nodes) {
       if (node.ignored) continue;
+
+      // P1-3: If we have a scoped set, only consider nodes within it
+      if (scopedNodeIds && !scopedNodeIds.has(node.nodeId)) continue;
+
       const role = node.role?.value;
       if (role === 'option' || role === 'menuitem' || role === 'listitem' || role === 'treeitem') {
         const text = (node.name?.value || '').trim();

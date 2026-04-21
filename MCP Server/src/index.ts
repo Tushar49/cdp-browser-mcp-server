@@ -5,9 +5,19 @@
  *  - Configuration (env vars → typed config)
  *  - CDP client (WebSocket connection to the browser)
  *  - Health monitor (ping/pong + auto-reconnect)
+ *  - Domain manager (lazy CDP domain enablement)
+ *  - Snapshot cache (incremental/diff snapshots)
  *  - Tool registry (registration + dispatch)
  *  - MCP SDK server (STDIO transport)
+ *
+ * Startup optimizations:
+ *  - No browser discovery at startup (lazy on first tool call)
+ *  - Synchronous tool registration (no async)
+ *  - STDIO transport started immediately
+ *  - Startup time logged to stderr for benchmarking
  */
+
+const startTime = performance.now();
 
 import { randomUUID } from 'crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -18,10 +28,17 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { loadConfig } from './config.js';
 import { CDPClient } from './connection/cdp-client.js';
+import { DomainManager } from './connection/domain-manager.js';
+import { TabSessionService } from './connection/tab-session-service.js';
+import { SessionManager } from './session/session-manager.js';
+import { TabOwnership } from './session/tab-ownership.js';
 import { ModalStateManager } from './session/modal-state.js';
 import { HealthMonitor } from './connection/health-monitor.js';
+import { SnapshotCache } from './snapshot/cache.js';
 import { ToolRegistry } from './tools/registry.js';
+import { preprocessToolCall } from './tools/dispatch.js';
 import { defineTool, success } from './tools/base-tool.js';
+import { wrapError } from './utils/error-handler.js';
 import type { ServerContext } from './types.js';
 
 // Tool modules
@@ -46,16 +63,24 @@ const config = loadConfig();
 
 const cdpClient = new CDPClient({ commandTimeout: config.globalTimeout });
 
+// Lazy initialization: HealthMonitor is created but doesn't discover browsers
 const healthMonitor = new HealthMonitor(cdpClient, {
   cdpHost: config.cdpHost,
   cdpPort: config.cdpPort,
   preferredProfile: config.autoConnectProfile,
 });
 
+const domainManager = new DomainManager();
+const tabSessionService = new TabSessionService();
+const snapshotCache = new SnapshotCache();
 const registry = new ToolRegistry();
 
 // Wire auto-reconnect: when the WebSocket drops, let HealthMonitor retry
+// and clear domain state since all sessions are invalidated
 cdpClient.on('disconnected', () => {
+  domainManager.clearAll();
+  snapshotCache.clear();
+  tabSessionService.clear();
   healthMonitor.onDisconnect().catch(() => {
     // Reconnect failed — next tool call will trigger autoConnect
   });
@@ -67,19 +92,32 @@ const ctx: ServerContext = {
   config,
   cdpClient,
   healthMonitor,
+  domainManager,
   sendCommand: (method, params, sessionId) =>
     cdpClient.send(method, params ?? {}, sessionId),
-  sessions: new Map(),
-  tabLocks: new Map(),
+  tabSessions: tabSessionService,
+  sessions: new SessionManager(),
+  tabOwnership: new TabOwnership(),
   modalStates: new ModalStateManager(),
   processSessionId: randomUUID(),
+  snapshotCache,
+  elementResolvers: new Map(),
 };
 
-// ─── Auto-connect ───────────────────────────────────────────────────
+// ─── Auto-connect with mutex (P0-2) ────────────────────────────────
+
+let connectPromise: Promise<void> | null = null;
 
 async function ensureConnected(): Promise<void> {
   if (cdpClient.isConnected) return;
-  await healthMonitor.autoConnect();
+  if (connectPromise) return connectPromise;
+
+  connectPromise = healthMonitor.autoConnect();
+  try {
+    await connectPromise;
+  } finally {
+    connectPromise = null;
+  }
 }
 
 // ─── Demo Tools ─────────────────────────────────────────────────────
@@ -142,19 +180,31 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
+  const { name, arguments: rawArgs } = request.params;
 
-  // Auto-connect on first tool call (best-effort — some tools work without a browser)
+  // Auto-connect on first tool call
+  // P0-4: Surface connection errors for browser-dependent tools instead of swallowing
   try {
     await ensureConnected();
-  } catch {
-    // Connection failed — still dispatch; tools like ping/status work offline
+  } catch (err) {
+    if (name !== 'ping' && name !== 'status') {
+      return wrapError(err).toToolResult();
+    }
   }
 
-  return registry.dispatch(name, args ?? {}, ctx);
+  try {
+    // P0-1: Preprocess — session routing, tab claiming, modal checks
+    const args = await preprocessToolCall(ctx, name, rawArgs ?? {});
+    return await registry.dispatch(name, args, ctx);
+  } catch (err) {
+    return wrapError(err).toToolResult();
+  }
 });
 
 // ─── Start ──────────────────────────────────────────────────────────
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
+
+const elapsed = performance.now() - startTime;
+process.stderr.write(`CDP Browser MCP v${VERSION} started in ${elapsed.toFixed(0)}ms\n`);

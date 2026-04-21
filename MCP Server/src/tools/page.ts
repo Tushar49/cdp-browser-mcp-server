@@ -67,6 +67,10 @@ async function handleGoto(ctx: ServerContext, args: PageArgs): Promise<ToolResul
   if (!args.url) return fail("Provide 'url' for navigation.");
   const sess = await getTabSession(ctx, args.tabId);
   await ensureDomain(ctx, sess, 'Page');
+
+  // P1-2: Clear ElementResolver on navigation — backendNodeIds are invalidated
+  ctx.elementResolvers.get(args.tabId)?.onNavigation();
+
   const result = await ctx.sendCommand('Page.navigate', { url: args.url }, sess) as Record<string, unknown>;
   if (result.errorText) return fail(`Navigation failed: ${result.errorText}`);
 
@@ -90,6 +94,7 @@ async function handleGoto(ctx: ServerContext, args: PageArgs): Promise<ToolResul
 
 async function handleBack(ctx: ServerContext, args: PageArgs): Promise<ToolResult> {
   const sess = await getTabSession(ctx, args.tabId);
+  ctx.elementResolvers.get(args.tabId)?.onNavigation();
   const history = await ctx.sendCommand('Page.getNavigationHistory', {}, sess) as {
     currentIndex: number;
     entries: Array<{ id: number }>;
@@ -115,6 +120,7 @@ async function handleBack(ctx: ServerContext, args: PageArgs): Promise<ToolResul
 
 async function handleForward(ctx: ServerContext, args: PageArgs): Promise<ToolResult> {
   const sess = await getTabSession(ctx, args.tabId);
+  ctx.elementResolvers.get(args.tabId)?.onNavigation();
   const history = await ctx.sendCommand('Page.getNavigationHistory', {}, sess) as {
     currentIndex: number;
     entries: Array<{ id: number }>;
@@ -140,6 +146,7 @@ async function handleForward(ctx: ServerContext, args: PageArgs): Promise<ToolRe
 
 async function handleReload(ctx: ServerContext, args: PageArgs): Promise<ToolResult> {
   const sess = await getTabSession(ctx, args.tabId);
+  ctx.elementResolvers.get(args.tabId)?.onNavigation();
   await ctx.sendCommand('Page.reload', { ignoreCache: args.ignoreCache || false }, sess);
   const waitUntil = args.waitUntil || 'load';
   const navTimeout = args.timeout || 15000;
@@ -217,10 +224,13 @@ async function handleSnapshot(ctx: ServerContext, args: PageArgs): Promise<ToolR
   // Optimize the tree for LLM consumption
   const optimized = TokenOptimizer.optimize(tree);
 
-  // Assign stable refs
-  // TODO: Use per-tab ElementResolver when session management is wired
+  // P1-2: Use per-tab ElementResolver for stable uid refs across snapshots
   const { ElementResolver } = await import('../snapshot/element-resolver.js');
-  const resolver = new ElementResolver();
+  let resolver = ctx.elementResolvers.get(args.tabId);
+  if (!resolver) {
+    resolver = new ElementResolver();
+    ctx.elementResolvers.set(args.tabId, resolver);
+  }
   resolver.assignRefs(optimized);
 
   const snapshot = serializeTree(optimized);
