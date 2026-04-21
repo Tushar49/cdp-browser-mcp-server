@@ -1,6 +1,15 @@
 import { describe, it, expect } from 'vitest';
 
-const CDP_AVAILABLE = process.env.CDP_TEST === 'true';
+// Runtime browser detection — no env var needed
+async function isCdpAvailable(): Promise<boolean> {
+  try {
+    const res = await fetch('http://localhost:9222/json/version');
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+const CDP_AVAILABLE = await isCdpAvailable();
 const describeIf = CDP_AVAILABLE ? describe : describe.skip;
 
 describeIf('Form Filling Integration', () => {

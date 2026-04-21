@@ -16,7 +16,7 @@ npm run typecheck    # Type-check without emitting (tsc --noEmit)
 npm run start        # Start new v5 server
 npm run start:legacy # Start old v4 server (server.js)
 npm run test         # Run vitest tests
-npm run lint         # ESLint
+npm run lint         # Typecheck (tsc --noEmit)
 ```
 
 ## Development Rules

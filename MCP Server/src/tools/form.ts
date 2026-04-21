@@ -393,6 +393,7 @@ async function fillCombobox(
         // Collect all descendant nodeIds of this listbox
         scopedNodeIds = new Set<string>();
         const collectChildren = (nodeId: string) => {
+          if (scopedNodeIds!.has(nodeId)) return; // Prevent infinite recursion on circular refs
           scopedNodeIds!.add(nodeId);
           const nd = nodes.find(n => n.nodeId === nodeId);
           for (const childId of nd?.childIds || []) {
@@ -419,6 +420,7 @@ async function fillCombobox(
       if (expandedListbox) {
         scopedNodeIds = new Set<string>();
         const collectChildren = (nodeId: string) => {
+          if (scopedNodeIds!.has(nodeId)) return; // Prevent infinite recursion on circular refs
           scopedNodeIds!.add(nodeId);
           const nd = nodes.find(n => n.nodeId === nodeId);
           for (const childId of nd?.childIds || []) {

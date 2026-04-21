@@ -33,6 +33,7 @@ import { TabSessionService } from './connection/tab-session-service.js';
 import { SessionManager } from './session/session-manager.js';
 import { TabOwnership } from './session/tab-ownership.js';
 import { ModalStateManager } from './session/modal-state.js';
+import type { ModalState } from './session/modal-state.js';
 import { HealthMonitor } from './connection/health-monitor.js';
 import { SnapshotCache } from './snapshot/cache.js';
 import { ToolRegistry } from './tools/registry.js';
@@ -85,6 +86,79 @@ cdpClient.on('disconnected', () => {
     // Reconnect failed — next tool call will trigger autoConnect
   });
 });
+
+// Wire modal state when connected
+cdpClient.on('connected', () => {
+  wireModalEvents(ctx);
+});
+
+// ─── Modal State Wiring ─────────────────────────────────────────────
+
+/** Subscribe to CDP events that populate modal state. */
+function wireModalEvents(serverCtx: ServerContext): void {
+  const client = serverCtx.cdpClient;
+
+  client.on('event', (event: { method: string; params: Record<string, unknown>; sessionId?: string }) => {
+    switch (event.method) {
+      case 'Page.javascriptDialogOpening': {
+        const tabId = findTabBySession(serverCtx, event.sessionId);
+        if (tabId) {
+          serverCtx.modalStates.setModal(tabId, {
+            type: 'dialog',
+            tabId,
+            details: {
+              dialogType: event.params.type as ModalState['details']['dialogType'],
+              message: event.params.message as string | undefined,
+              defaultPrompt: event.params.defaultPrompt as string | undefined,
+            },
+            timestamp: Date.now(),
+          });
+        }
+        break;
+      }
+
+      case 'Page.javascriptDialogClosed': {
+        const tabId = findTabBySession(serverCtx, event.sessionId);
+        if (tabId) serverCtx.modalStates.clearModal(tabId);
+        break;
+      }
+
+      case 'Debugger.paused': {
+        const tabId = findTabBySession(serverCtx, event.sessionId);
+        if (tabId) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- CDP callFrames shape is untyped
+          const frames = event.params.callFrames as any[];
+          const frame = frames?.[0];
+          serverCtx.modalStates.setModal(tabId, {
+            type: 'debugger-paused',
+            tabId,
+            details: {
+              reason: event.params.reason as string | undefined,
+              location: frame ? `${frame.url}:${frame.location?.lineNumber}` : undefined,
+            },
+            timestamp: Date.now(),
+          });
+        }
+        break;
+      }
+
+      case 'Debugger.resumed': {
+        const tabId = findTabBySession(serverCtx, event.sessionId);
+        if (tabId) serverCtx.modalStates.clearModal(tabId);
+        break;
+      }
+    }
+  });
+}
+
+/** Reverse lookup: find tabId from a CDP sessionId. */
+function findTabBySession(serverCtx: ServerContext, sessionId?: string): string | undefined {
+  if (!sessionId) return undefined;
+  for (const [tabId, cdpSid] of serverCtx.tabSessions.entries()) {
+    if (cdpSid === sessionId) return tabId;
+  }
+  return undefined;
+}
 
 // ─── Server Context (DI container) ──────────────────────────────────
 

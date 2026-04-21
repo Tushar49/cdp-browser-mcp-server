@@ -8,7 +8,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-5.0.0--alpha.1-blue" alt="Version">
-  <img src="https://img.shields.io/badge/tools-12-green" alt="Tools">
+  <img src="https://img.shields.io/badge/tools-14-green" alt="Tools">
   <img src="https://img.shields.io/badge/sub--actions-90+-green" alt="Actions">
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen" alt="Node">
   <img src="https://img.shields.io/badge/license-MIT-yellow" alt="License">
@@ -38,7 +38,7 @@ CDP Browser MCP Server connects to your **already-running** browser over a WebSo
 | Browser Use needs Python + LLM key | Heavy framework, double LLM cost |
 | BrowserTools MCP is read-only | Can observe but can't automate |
 
-**This server**: connects to Chrome on `localhost:9222`, uses the real browser state, and gives you **90+ automation actions** across 12 tools — built as a modular TypeScript codebase with 2 dependencies. Geolocation spoofing automatically grants browser permissions so permission-based sites just work.
+**This server**: connects to Chrome on `localhost:9222`, uses the real browser state, and gives you **90+ automation actions** across 14 tools — built as a modular TypeScript codebase with 2 dependencies. Geolocation spoofing automatically grants browser permissions so permission-based sites just work.
 
 ---
 
@@ -60,7 +60,7 @@ CDP Browser MCP Server connects to your **already-running** browser over a WebSo
 | 🚫 **Modal State System** | Dialogs and file choosers block other tools with recovery instructions |
 | ⚡ **Lazy CDP Domains** | Domains enabled on first use, not at connect time — faster startup |
 | 📊 **Snapshot Caching** | Per-tab cache for snapshot reuse — reduces redundant tree captures |
-| 🤖 **Agent Guidance** | All 12 tool descriptions include usage guidance and common pitfalls |
+| 🤖 **Agent Guidance** | All 14 tool descriptions include usage guidance and common pitfalls |
 | 🧹 **Default: Detach** | Tabs never auto-close when session expires — agents can't accidentally kill your tabs |
 
 ---
@@ -72,7 +72,7 @@ CDP Browser MCP Server connects to your **already-running** browser over a WebSo
 | Connects to real browser | **Yes** | Via flag only | No (cloud) | No | Read-only |
 | Preserves cookies/sessions | **Yes** | No | No | No | Yes |
 | Works with extensions | **Yes** | No | No | No | Yes |
-| Tool count | **12 tools, 90+ actions** | ~30 tools | ~10 tools | 7 tools | ~13 tools |
+| Tool count | **14 tools, 90+ actions** | ~30 tools | ~10 tools | 7 tools | ~13 tools |
 | Auto-connect | **Yes** (first tool call) | No | N/A | No | No |
 | Auto-waiting after actions | **Yes** | Yes | Yes | No | N/A |
 | Smart form filling | **Yes** (combobox, React Select) | Native `<select>` only | Via AI | No | No |

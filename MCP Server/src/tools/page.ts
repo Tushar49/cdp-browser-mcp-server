@@ -7,15 +7,44 @@
  */
 
 import { writeFileSync } from 'fs';
-import { join } from 'path';
+import { join, resolve, normalize } from 'path';
 import type { ToolResult, ServerContext } from '../types.js';
 import type { ToolRegistry } from './registry.js';
 import { defineTool } from './base-tool.js';
 import { ok, fail } from '../utils/helpers.js';
-import { Errors, wrapError } from '../utils/error-handler.js';
+import { ActionableError, Errors, wrapError } from '../utils/error-handler.js';
 import { sleep, waitForReadyState, waitForText, waitForTextGone, waitForSelector } from '../utils/wait.js';
 import type { WaitUntil, SelectorState } from '../utils/wait.js';
 import { TempFileManager } from '../utils/temp-files.js';
+
+// ─── Path Security ──────────────────────────────────────────────────
+
+const BLOCKED_PREFIXES = [
+  normalize('C:\\Windows'),
+  normalize('C:\\Program Files'),
+  normalize('C:\\Program Files (x86)'),
+  normalize('/etc'),
+  normalize('/usr'),
+  normalize('/bin'),
+  normalize('/sbin'),
+];
+
+/** Validate output path is not a protected system directory. */
+function validateOutputPath(userPath: string): string {
+  const resolved = resolve(userPath);
+  const normalized = normalize(resolved);
+
+  for (const blocked of BLOCKED_PREFIXES) {
+    if (normalized.toLowerCase().startsWith(blocked.toLowerCase())) {
+      throw new ActionableError(
+        `Cannot write to protected path: ${normalized}`,
+        'Choose a different output path. Suggested: use a path in your project or downloads folder.',
+      );
+    }
+  }
+
+  return normalized;
+}
 
 // ─── Arg Interfaces ─────────────────────────────────────────────────
 
@@ -465,8 +494,9 @@ async function handlePdf(ctx: ServerContext, args: PageArgs): Promise<ToolResult
 
   // Save PDF to disk
   if (args.path) {
-    writeFileSync(args.path, pdfBuffer);
-    return ok(`PDF saved to: ${args.path} (${(pdfBuffer.length / 1024).toFixed(1)} KB)`);
+    const safePath = validateOutputPath(args.path);
+    writeFileSync(safePath, pdfBuffer);
+    return ok(`PDF saved to: ${safePath} (${(pdfBuffer.length / 1024).toFixed(1)} KB)`);
   }
 
   // Use TempFileManager if tempDir is configured
@@ -616,9 +646,10 @@ function saveOrReturnScreenshot(
   savePath?: string,
 ): ToolResult {
   if (savePath) {
+    const safePath = validateOutputPath(savePath);
     const buf = Buffer.from(data, 'base64');
-    writeFileSync(savePath, buf);
-    return ok(`Screenshot saved to: ${savePath} (${(buf.length / 1024).toFixed(1)} KB)`);
+    writeFileSync(safePath, buf);
+    return ok(`Screenshot saved to: ${safePath} (${(buf.length / 1024).toFixed(1)} KB)`);
   }
   return {
     content: [{

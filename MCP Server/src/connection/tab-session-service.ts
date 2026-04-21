@@ -96,6 +96,11 @@ export class TabSessionService {
     this.enabledDomains.clear();
   }
 
+  /** Iterate over all [tabId, sessionId] pairs. */
+  entries(): IterableIterator<[string, string]> {
+    return this.sessions.entries();
+  }
+
   /** Number of active tab sessions. */
   get size(): number {
     return this.sessions.size;

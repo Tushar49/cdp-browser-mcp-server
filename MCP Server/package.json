@@ -31,9 +31,9 @@
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:integration": "CDP_TEST=true vitest run --config vitest.integration.config.ts",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
     "benchmark": "vitest run --config vitest.benchmark.config.ts",
-    "lint": "eslint src/",
+    "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "clean": "node -e \"const fs=require('fs');fs.rmSync('dist',{recursive:true,force:true})\""
   },

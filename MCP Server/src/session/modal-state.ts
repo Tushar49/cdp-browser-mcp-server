@@ -6,26 +6,16 @@
  * on that tab are blocked with an ActionableError that tells the agent
  * exactly how to resolve it.
  *
- * ─── Integration (not yet wired) ────────────────────────────────────
- * In `src/index.ts`, the server will:
+ * ─── Integration ─────────────────────────────────────────────────────
+ * Wired in src/index.ts via CDP event subscriptions:
  *
- *  1. Listen for CDP `Page.javascriptDialogOpening` events
- *     → ctx.modalStates.setModal(tabId, { type: 'dialog', ... })
+ *  - `Page.javascriptDialogOpening` → setModal(tabId, { type: 'dialog' })
+ *  - `Page.javascriptDialogClosed`  → clearModal(tabId)
+ *  - `Debugger.paused`              → setModal(tabId, { type: 'debugger-paused' })
+ *  - `Debugger.resumed`             → clearModal(tabId)
  *
- *  2. Listen for CDP `Page.fileChooserOpened` events
- *     → ctx.modalStates.setModal(tabId, { type: 'filechooser', ... })
- *
- *  3. Listen for CDP `Debugger.paused` events
- *     → ctx.modalStates.setModal(tabId, { type: 'debugger-paused', ... })
- *
- *  4. Clear modals when resolved:
- *     - `Page.javascriptDialogClosed`    → ctx.modalStates.clearModal(tabId)
- *     - File upload completed            → ctx.modalStates.clearModal(tabId)
- *     - `Debugger.resumed`              → ctx.modalStates.clearModal(tabId)
- *
- *  5. Before every tool dispatch, call:
- *     const blocked = ctx.modalStates.checkBlocked(tabId, toolName, action);
- *     if (blocked) return blocked.toToolResult();
+ * Before every tool dispatch, `preprocessToolCall()` calls:
+ *   ctx.modalStates.checkBlocked(tabId, toolName, action)
  * ────────────────────────────────────────────────────────────────────
  */
 

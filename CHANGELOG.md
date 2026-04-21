@@ -22,7 +22,7 @@ All notable changes to CDP Browser MCP Server will be documented in this file.
 - **Auto-Reconnect** — exponential backoff reconnection on browser disconnect
 - **Lazy Domain Enablement** — CDP domains enabled on first use, not at connect time
 - **Snapshot Caching** — per-tab cache with line-level diffing
-- **Agent Guidance** — all 12 tool descriptions include usage guidance and common pitfalls
+- **Agent Guidance** — all 14 tool descriptions include usage guidance and common pitfalls
 - **Dispatch Preprocessing** — session routing, tab claiming, modal checks on every tool call
 - **Connection Mutex** — prevents concurrent socket opens
 - **Tab Session Pooling** — reuse CDP sessions per tab
