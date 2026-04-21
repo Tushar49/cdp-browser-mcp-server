@@ -3,7 +3,7 @@
 ## Project Overview
 This is a Chrome DevTools Protocol (CDP) based MCP server that connects to the user's real running browser. It's the only browser MCP that preserves auth, cookies, sessions, and extensions.
 
-**Version:** 5.0.0-alpha.1
+**Version:** 5.0.0-alpha.2
 **Architecture:** TypeScript, modular (38 files in src/)
 **Entry point:** `MCP Server/dist/index.js` (built from `MCP Server/src/index.ts`)
 **Legacy fallback:** `MCP Server/server.js` (v4.13.0, will be removed in v5.0.0 stable)
