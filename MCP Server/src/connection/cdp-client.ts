@@ -6,6 +6,8 @@
  *  • Internal message-ID tracking and callback resolution
  *  • Typed EventEmitter for CDP domain events
  *  • Connection-state accessors
+ *  • Session pooling: reuses CDP sessions for already-attached targets
+ *  • Target caching: avoids redundant Target.getTargets() HTTP calls
  */
 
 import { EventEmitter } from 'events';
@@ -19,11 +21,19 @@ export type ConnectionState = 'disconnected' | 'connecting' | 'connected';
 export interface CDPClientOptions {
   /** Per-command timeout in ms (default 30 000). */
   commandTimeout?: number;
+  /** How long (ms) to cache Target.getTargets() results (default 2000). */
+  targetCacheTTL?: number;
 }
 
 interface PendingCallback {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
+}
+
+/** Cached target list result */
+interface TargetCache {
+  targets: unknown;
+  timestamp: number;
 }
 
 // Re-export protocol message types for convenience
@@ -46,9 +56,17 @@ export class CDPClient extends EventEmitter {
   private _state: ConnectionState = 'disconnected';
   private defaultTimeout: number;
 
+  // Session pooling: targetId → CDP sessionId (avoid re-attaching)
+  private sessionPool = new Map<string, string>();
+
+  // Target caching: avoid redundant Target.getTargets() calls
+  private targetCache: TargetCache | null = null;
+  private targetCacheTTL: number;
+
   constructor(opts: CDPClientOptions = {}) {
     super();
     this.defaultTimeout = opts.commandTimeout ?? 30_000;
+    this.targetCacheTTL = opts.targetCacheTTL ?? 2_000;
   }
 
   // ── Accessors ───────────────────────────────────────────────────
@@ -233,7 +251,66 @@ export class CDPClient extends EventEmitter {
       reject(new Error('WebSocket closed'));
     }
     this.callbacks.clear();
+    this.sessionPool.clear();
+    this.targetCache = null;
     this.ws = null;
     this._state = 'disconnected';
+  }
+
+  // ── Session Pooling ────────────────────────────────────────────
+
+  /**
+   * Get a cached CDP session ID for a target, or null if not pooled.
+   * Avoids redundant Target.attachToTarget calls for already-attached targets.
+   */
+  getPooledSession(targetId: string): string | null {
+    return this.sessionPool.get(targetId) ?? null;
+  }
+
+  /**
+   * Store a CDP session ID for a target in the pool.
+   */
+  poolSession(targetId: string, sessionId: string): void {
+    this.sessionPool.set(targetId, sessionId);
+  }
+
+  /**
+   * Remove a session from the pool (e.g. on detach or target close).
+   */
+  unpoolSession(targetId: string): void {
+    this.sessionPool.delete(targetId);
+  }
+
+  /** Number of pooled sessions */
+  get pooledSessionCount(): number {
+    return this.sessionPool.size;
+  }
+
+  // ── Target Caching ─────────────────────────────────────────────
+
+  /**
+   * Get targets with caching. If a valid cached result exists within
+   * the TTL window, returns it without issuing a CDP command.
+   * Otherwise fetches fresh targets and caches the result.
+   */
+  async getTargetsCached(): Promise<unknown> {
+    const now = Date.now();
+    if (
+      this.targetCache &&
+      now - this.targetCache.timestamp < this.targetCacheTTL
+    ) {
+      return this.targetCache.targets;
+    }
+
+    const result = await this.send('Target.getTargets');
+    this.targetCache = { targets: result, timestamp: Date.now() };
+    return result;
+  }
+
+  /**
+   * Invalidate the target cache (e.g. after creating/closing a tab).
+   */
+  invalidateTargetCache(): void {
+    this.targetCache = null;
   }
 }
