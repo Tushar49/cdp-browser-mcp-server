@@ -107,7 +107,7 @@ export async function jsClickElement(
 
 async function handleClick(ctx: ServerContext, args: InteractArgs): Promise<ToolResult> {
   const sess = await getTabSession(ctx, args.tabId);
-  const retryTimeout = args.timeout || 5000;
+  const retryTimeout = args.timeout || ctx.config.actionTimeout;
 
   const el = await withRetry(
     () => resolveAndCheck(ctx, sess, args.uid, args.selector),
@@ -171,7 +171,7 @@ async function handleClick(ctx: ServerContext, args: InteractArgs): Promise<Tool
 
 async function handleHover(ctx: ServerContext, args: InteractArgs): Promise<ToolResult> {
   const sess = await getTabSession(ctx, args.tabId);
-  const retryTimeout = args.timeout || 5000;
+  const retryTimeout = args.timeout || ctx.config.actionTimeout;
   const el = await withRetry(
     () => resolveElement(ctx, sess, args.uid, args.selector),
     retryTimeout,
@@ -198,7 +198,7 @@ async function handleHover(ctx: ServerContext, args: InteractArgs): Promise<Tool
 async function handleType(ctx: ServerContext, args: InteractArgs): Promise<ToolResult> {
   if (!args.text) return fail("Provide 'text' to type.");
   const sess = await getTabSession(ctx, args.tabId);
-  const retryTimeout = args.timeout || 5000;
+  const retryTimeout = args.timeout || ctx.config.actionTimeout;
 
   // Resolve element and focus it
   const { objectId, resolvedSession } = await withRetry(async () => {
@@ -311,7 +311,7 @@ async function handleType(ctx: ServerContext, args: InteractArgs): Promise<ToolR
 async function handleFill(ctx: ServerContext, args: InteractArgs): Promise<ToolResult> {
   if (!args.fields?.length) return fail("Provide 'fields' array.");
   const sess = await getTabSession(ctx, args.tabId);
-  const retryTimeout = args.timeout || 5000;
+  const retryTimeout = args.timeout || ctx.config.actionTimeout;
   const results: Array<Record<string, unknown>> = [];
 
   for (const field of args.fields) {
@@ -373,7 +373,7 @@ async function handleFill(ctx: ServerContext, args: InteractArgs): Promise<ToolR
 async function handleSelect(ctx: ServerContext, args: InteractArgs): Promise<ToolResult> {
   if (!args.value) return fail("Provide 'value' to select.");
   const sess = await getTabSession(ctx, args.tabId);
-  const retryTimeout = args.timeout || 5000;
+  const retryTimeout = args.timeout || ctx.config.actionTimeout;
 
   const { objectId, resolvedSession } = await withRetry(async () => {
     await resolveAndCheck(ctx, sess, args.uid, args.selector);
@@ -469,7 +469,7 @@ async function handlePress(ctx: ServerContext, args: InteractArgs): Promise<Tool
 
 async function handleDrag(ctx: ServerContext, args: InteractArgs): Promise<ToolResult> {
   const sess = await getTabSession(ctx, args.tabId);
-  const retryTimeout = args.timeout || 5000;
+  const retryTimeout = args.timeout || ctx.config.actionTimeout;
 
   const src = await withRetry(
     () => resolveElement(ctx, sess, args.sourceUid, args.sourceSelector),
@@ -519,7 +519,7 @@ async function handleDrag(ctx: ServerContext, args: InteractArgs): Promise<ToolR
 async function handleScroll(ctx: ServerContext, args: InteractArgs): Promise<ToolResult> {
   const sess = await getTabSession(ctx, args.tabId);
   const amount = args.amount || 400;
-  const retryTimeout = args.timeout || 5000;
+  const retryTimeout = args.timeout || ctx.config.actionTimeout;
 
   // scrollTo absolute position
   if (args.x !== undefined || args.y !== undefined) {
@@ -577,7 +577,7 @@ async function handleScroll(ctx: ServerContext, args: InteractArgs): Promise<Too
 async function handleUpload(ctx: ServerContext, args: InteractArgs): Promise<ToolResult> {
   if (!args.files?.length) return fail("Provide 'files' array with absolute file paths.");
   const sess = await getTabSession(ctx, args.tabId);
-  const retryTimeout = args.timeout || 5000;
+  const retryTimeout = args.timeout || ctx.config.actionTimeout;
 
   // No element specified — try to find a file input on the page
   if (!args.uid && !args.selector) {
@@ -585,7 +585,7 @@ async function handleUpload(ctx: ServerContext, args: InteractArgs): Promise<Too
     if (found) {
       return ok(`Uploaded ${args.files.length} file(s) via file input: ${args.files.map(f => f.split(/[/\\]/).pop()).join(', ')}`);
     }
-    return Errors.fileChooserTimeout(args.timeout || 30000).toToolResult();
+    return Errors.fileChooserTimeout(args.timeout || ctx.config.navigationTimeout).toToolResult();
   }
 
   // Element specified — use direct file input approach
@@ -606,7 +606,7 @@ async function handleUpload(ctx: ServerContext, args: InteractArgs): Promise<Too
 
 async function handleFocus(ctx: ServerContext, args: InteractArgs): Promise<ToolResult> {
   const sess = await getTabSession(ctx, args.tabId);
-  const retryTimeout = args.timeout || 5000;
+  const retryTimeout = args.timeout || ctx.config.actionTimeout;
   const { objectId, resolvedSession } = await withRetry(
     () => resolveElementObjectId(ctx, sess, args.uid, args.selector),
     retryTimeout,
@@ -630,7 +630,7 @@ async function handleFocus(ctx: ServerContext, args: InteractArgs): Promise<Tool
 async function handleCheck(ctx: ServerContext, args: InteractArgs): Promise<ToolResult> {
   if (args.checked === undefined) return fail("Provide 'checked' (true/false).");
   const sess = await getTabSession(ctx, args.tabId);
-  const retryTimeout = args.timeout || 5000;
+  const retryTimeout = args.timeout || ctx.config.actionTimeout;
 
   const { objectId, resolvedSession } = await withRetry(async () => {
     await resolveAndCheck(ctx, sess, args.uid, args.selector);
@@ -656,7 +656,7 @@ async function handleCheck(ctx: ServerContext, args: InteractArgs): Promise<Tool
 
 async function handleTap(ctx: ServerContext, args: InteractArgs): Promise<ToolResult> {
   const sess = await getTabSession(ctx, args.tabId);
-  const retryTimeout = args.timeout || 5000;
+  const retryTimeout = args.timeout || ctx.config.actionTimeout;
   const el = await withRetry(
     () => resolveAndCheck(ctx, sess, args.uid, args.selector),
     retryTimeout,
@@ -974,11 +974,11 @@ const INTERACT_DESCRIPTION = [
   '',
   'Frame interaction: Use \'uid\' from snapshots to interact with elements inside iframes — CSS selectors only find top-level elements. Snapshot includes iframe content with [frame N] prefixes.',
   '',
-  'Auto-retry: All actions automatically retry element resolution and actionability checks until the element is found+actionable or timeout expires (default: 5000ms). Use \'timeout\' to customize.',
+  'Auto-retry: All actions automatically retry element resolution and actionability checks until the element is found+actionable or timeout expires (default: CDP_ACTION_TIMEOUT). Use \'timeout\' to customize.',
   '',
   'Human-like mode: Set humanMode: true for realistic mouse paths (bezier curves, overshoot, jitter). Works with click, hover, drag. Combine with charDelay/wordDelay + typoRate for human typing.',
   '',
-  'Auto-snapshot: Set autoSnapshot: true to get a before/after diff appended to the action response — shows what changed without a separate snapshot call.',
+  'Auto-snapshot (experimental): Set autoSnapshot: true to capture snapshots before/after the action. Not yet implemented — reserved for future use.',
   '',
   'Keys for press: Enter, Tab, Escape, Backspace, Delete, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Home, End, PageUp, PageDown, Space, F1-F12, Insert',
 ].join('\n');
@@ -1060,7 +1060,7 @@ const INTERACT_INPUT_SCHEMA = {
     checked: { type: 'boolean' as const, description: 'Desired checked state for check action.' },
     timeout: {
       type: 'number' as const,
-      description: 'Retry timeout in ms for element resolution and actionability (default: 5000ms). Element is polled until found+actionable or timeout.',
+      description: 'Retry timeout in ms for element resolution and actionability (default: CDP_ACTION_TIMEOUT). Element is polled until found+actionable or timeout.',
     },
     humanMode: {
       type: 'boolean' as const,
@@ -1068,7 +1068,7 @@ const INTERACT_INPUT_SCHEMA = {
     },
     autoSnapshot: {
       type: 'boolean' as const,
-      description: 'Take accessibility snapshots before and after the action, return a diff of changes. Shows what changed without a separate snapshot call.',
+      description: '(Experimental — not yet implemented) Take accessibility snapshots before and after the action.',
     },
     typoRate: {
       type: 'number' as const,

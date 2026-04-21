@@ -6,6 +6,8 @@
  * wait conditions, PDF export, dialogs, script/CSS injection, and CSP bypass.
  */
 
+import { writeFileSync } from 'fs';
+import { join } from 'path';
 import type { ToolResult, ServerContext } from '../types.js';
 import type { ToolRegistry } from './registry.js';
 import { defineTool } from './base-tool.js';
@@ -13,6 +15,7 @@ import { ok, fail } from '../utils/helpers.js';
 import { Errors, wrapError } from '../utils/error-handler.js';
 import { sleep, waitForReadyState, waitForText, waitForTextGone, waitForSelector } from '../utils/wait.js';
 import type { WaitUntil, SelectorState } from '../utils/wait.js';
+import { TempFileManager } from '../utils/temp-files.js';
 
 // ─── Arg Interfaces ─────────────────────────────────────────────────
 
@@ -75,7 +78,7 @@ async function handleGoto(ctx: ServerContext, args: PageArgs): Promise<ToolResul
   if (result.errorText) return fail(`Navigation failed: ${result.errorText}`);
 
   const waitUntil = args.waitUntil || 'load';
-  const navTimeout = args.timeout || 30000;
+  const navTimeout = args.timeout || ctx.config.navigationTimeout;
 
   if (waitUntil === 'commit') {
     const title = await evalTitle(ctx, sess);
@@ -106,7 +109,7 @@ async function handleBack(ctx: ServerContext, args: PageArgs): Promise<ToolResul
       sess,
     );
     const waitUntil = args.waitUntil || 'load';
-    const navTimeout = args.timeout || 15000;
+    const navTimeout = args.timeout || ctx.config.navigationTimeout;
     if (waitUntil !== 'commit') {
       await waitForReadyState(cdpSendAdapter(ctx, sess), sess, waitUntil, navTimeout);
     } else {
@@ -132,7 +135,7 @@ async function handleForward(ctx: ServerContext, args: PageArgs): Promise<ToolRe
       sess,
     );
     const waitUntil = args.waitUntil || 'load';
-    const navTimeout = args.timeout || 15000;
+    const navTimeout = args.timeout || ctx.config.navigationTimeout;
     if (waitUntil !== 'commit') {
       await waitForReadyState(cdpSendAdapter(ctx, sess), sess, waitUntil, navTimeout);
     } else {
@@ -149,7 +152,7 @@ async function handleReload(ctx: ServerContext, args: PageArgs): Promise<ToolRes
   ctx.elementResolvers.get(args.tabId)?.onNavigation();
   await ctx.sendCommand('Page.reload', { ignoreCache: args.ignoreCache || false }, sess);
   const waitUntil = args.waitUntil || 'load';
-  const navTimeout = args.timeout || 15000;
+  const navTimeout = args.timeout || ctx.config.navigationTimeout;
   if (waitUntil !== 'commit') {
     await waitForReadyState(cdpSendAdapter(ctx, sess), sess, waitUntil, navTimeout);
   } else {
@@ -379,7 +382,7 @@ async function handleWait(ctx: ServerContext, args: PageArgs): Promise<ToolResul
   }
 
   const sess = await getTabSession(ctx, args.tabId);
-  const timeout = args.timeout || 10000;
+  const timeout = args.timeout || ctx.config.actionTimeout;
   const cdpSend = cdpSendAdapter(ctx, sess);
 
   if (args.textGone) {
@@ -418,10 +421,24 @@ async function handlePdf(ctx: ServerContext, args: PageArgs): Promise<ToolResult
   };
 
   const { data } = await ctx.sendCommand('Page.printToPDF', pdfParams, sess) as { data: string };
-  const buf = Buffer.from(data, 'base64');
+  const pdfBuffer = Buffer.from(data, 'base64');
 
-  // TODO: Wire TempFileManager when integration is complete
-  return ok(`PDF generated (${(buf.length / 1024).toFixed(1)} KB). Wire TempFileManager to save to disk.`);
+  // Save PDF to disk
+  if (args.path) {
+    writeFileSync(args.path, pdfBuffer);
+    return ok(`PDF saved to: ${args.path} (${(pdfBuffer.length / 1024).toFixed(1)} KB)`);
+  }
+
+  // Use TempFileManager if tempDir is configured
+  const tempDir = ctx.config.tempDir || join(process.cwd(), '.temp');
+  const tempManager = new TempFileManager({
+    tempDir,
+    maxTempFiles: ctx.config.maxTempFiles,
+    maxTempAgeMs: ctx.config.maxTempAgeMs,
+  });
+  const fileName = `page-${Date.now()}.pdf`;
+  const filePath = tempManager.write(fileName, pdfBuffer, 'binary' as BufferEncoding);
+  return ok(`PDF saved to: ${filePath} (${(pdfBuffer.length / 1024).toFixed(1)} KB)`);
 }
 
 async function handleDialog(ctx: ServerContext, args: PageArgs): Promise<ToolResult> {
@@ -623,7 +640,7 @@ const PAGE_DESCRIPTION = [
   '- forward: Navigate forward in browser history (requires: tabId; optional: waitUntil, timeout)',
   '- reload: Reload the current page (requires: tabId; optional: ignoreCache, waitUntil, timeout)',
   '- snapshot: Capture accessibility tree snapshot with element refs for interaction (requires: tabId)',
-  '- screenshot: Take a screenshot of the page or a specific element (requires: tabId; optional: fullPage, quality, uid, type[png|jpeg], path — absolute file path to save to disk)',
+  '- screenshot: Take a screenshot of the page (requires: tabId; optional: fullPage, quality, type[png|jpeg], path — absolute file path to save to disk)',
   "- content: Extract text or HTML content from the page or an element (requires: tabId; optional: uid, selector, format[text|html|full] — 'full' returns complete document HTML with doctype)",
   "- set_content: Set the page's HTML content directly (requires: tabId, html)",
   "- wait: Wait for condition or fixed delay (requires: tabId; provide text, textGone, selector for polling — or just timeout for fixed delay; optional: timeout[ms], state[visible|hidden|attached|detached] for selector waits)",
@@ -636,7 +653,7 @@ const PAGE_DESCRIPTION = [
   'Notes:',
   '- Always take a snapshot before interacting with elements — it provides uid refs needed by interact tools',
   '- The snapshot returns an accessibility tree with roles, names, and properties matching ARIA semantics',
-  '- Wait actions poll every 300ms up to the timeout (default: 10000ms)',
+  '- Wait actions poll every 300ms up to the timeout (default: CDP_ACTION_TIMEOUT)',
   "- All timeouts are in MILLISECONDS (e.g. timeout: 3000 = 3 seconds). Use timeout alone for a fixed delay (like Playwright's waitForTimeout).",
   "- Screenshots: pass 'path' (absolute file path) to save to disk instead of inline base64. Use 'type' to control format (png default, jpeg for smaller size).",
 ].join('\n');
@@ -679,7 +696,7 @@ const PAGE_INPUT_SCHEMA = {
     textGone: { type: 'string' as const, description: 'Text to wait to disappear.' },
     timeout: {
       type: 'number' as const,
-      description: "Timeout in milliseconds. With text/textGone/selector: max polling time (default: 10000ms). Alone: fixed delay like Playwright's waitForTimeout. Max: 60000ms.",
+      description: "Timeout in milliseconds. With text/textGone/selector: max polling time (default: CDP_ACTION_TIMEOUT). Alone: fixed delay like Playwright's waitForTimeout. Max: 60000ms.",
     },
     state: {
       type: 'string' as const,

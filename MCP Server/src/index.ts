@@ -183,11 +183,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: rawArgs } = request.params;
 
   // Auto-connect on first tool call
+  // P0-1 (cycle 2): browser tool is exempt — it needs to work when NOT connected
   // P0-4: Surface connection errors for browser-dependent tools instead of swallowing
-  try {
-    await ensureConnected();
-  } catch (err) {
-    if (name !== 'ping' && name !== 'status') {
+  const CONNECT_EXEMPT_TOOLS = new Set(['ping', 'status', 'browser']);
+  if (!CONNECT_EXEMPT_TOOLS.has(name)) {
+    try {
+      await ensureConnected();
+    } catch (err) {
       return wrapError(err).toToolResult();
     }
   }

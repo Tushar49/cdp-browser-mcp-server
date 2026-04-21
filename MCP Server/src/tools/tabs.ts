@@ -23,7 +23,7 @@ async function handleList(
     filter: [{ type: 'page' }],
   })) as { targetInfos: Array<Record<string, unknown>> };
 
-  const tabs = targets.targetInfos ?? [];
+  let tabs = targets.targetInfos ?? [];
   if (!tabs.length) return ok('No open tabs found.');
 
   // Issue #23: If session has 0 owned tabs, auto-enable showAll
@@ -36,6 +36,15 @@ async function handleList(
       showAll = true;
       autoShowAll = true;
     }
+  }
+
+  // P1-2 (cycle 2): Filter by session ownership unless showAll
+  if (!showAll && sessionId) {
+    tabs = tabs.filter((t) => {
+      const lock = ctx.tabOwnership.getLock(t.targetId as string);
+      return !lock?.sessionId || lock.sessionId === sessionId;
+    });
+    if (!tabs.length) return ok('No accessible tabs. Use showAll: true to see all browser tabs.');
   }
 
   const lines = tabs.map((t, i) => {

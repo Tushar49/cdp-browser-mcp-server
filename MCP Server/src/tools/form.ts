@@ -21,7 +21,7 @@ import { sleep } from '../utils/wait.js';
 
 interface FormField {
   uid: number;
-  value: string;
+  value?: string;
   type?: 'auto' | 'text' | 'combobox' | 'checkbox' | 'radio' | 'select' | 'date' | 'file';
 }
 
@@ -31,6 +31,13 @@ interface FormArgs {
   fields: FormField[];
   sessionId?: string;
   cleanupStrategy?: string;
+}
+
+/** Validated form field with required value for fill action. */
+interface FillField {
+  uid: number;
+  value: string;
+  type?: FormField['type'];
 }
 
 /** Result for a single field operation. */
@@ -1080,7 +1087,7 @@ const FORM_INPUT_SCHEMA = {
     },
     fields: {
       type: 'array' as const,
-      description: 'Fields to operate on. Each needs uid (from snapshot) and value (for fill).',
+      description: 'Fields to operate on. Each needs uid (from snapshot). Value is required for fill, optional for read/clear.',
       items: {
         type: 'object' as const,
         properties: {
@@ -1098,7 +1105,7 @@ const FORM_INPUT_SCHEMA = {
             description: 'Field type. Default "auto" detects from a11y role.',
           },
         },
-        required: ['uid', 'value'] as const,
+        required: ['uid'] as const,
       },
     },
     sessionId: {
@@ -1134,10 +1141,16 @@ export function registerFormTools(registry: ToolRegistry, _ctx: ServerContext): 
 
           switch (args.action) {
             case 'fill': {
+              // Validate that all fields have a value for fill action
+              for (const field of args.fields) {
+                if (field.value === undefined || field.value === null) {
+                  return fail(`Field uid=${field.uid} requires a 'value' for fill action.`);
+                }
+              }
               const results: FieldResult[] = [];
               for (const field of args.fields) {
                 try {
-                  const result = await smartFillField(ctx, sess, field.uid, field.value, field.type);
+                  const result = await smartFillField(ctx, sess, field.uid, field.value!, field.type);
                   results.push(result);
                 } catch (e: unknown) {
                   const msg = e instanceof Error ? e.message : String(e);

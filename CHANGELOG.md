@@ -30,7 +30,7 @@ All notable changes to CDP Browser MCP Server will be documented in this file.
 - **Profile-Aware Tabs** — `tabs.new({ profile: "Work" })` opens in specific browser profile
 
 ### Changed
-- Architecture: 1 file (254KB) → 36 TypeScript modules (8,844 lines)
+- Architecture: 1 file (254KB) → 38 TypeScript modules (8,844 lines)
 - TypeScript with strict mode
 - Tiered timeouts: action=10s, navigation=60s, snapshot=15s
 - Console errors from Chrome extensions automatically filtered
