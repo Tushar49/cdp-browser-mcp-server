@@ -23,6 +23,19 @@ import { ToolRegistry } from './tools/registry.js';
 import { defineTool, success } from './tools/base-tool.js';
 import type { ServerContext } from './types.js';
 
+// Tool modules
+import { registerTabsTools } from './tools/tabs.js';
+import { registerPageTools } from './tools/page.js';
+import { registerInteractTools } from './tools/interact.js';
+import { registerExecuteTools } from './tools/execute.js';
+import { registerObserveTools } from './tools/observe.js';
+import { registerEmulateTools } from './tools/emulate.js';
+import { registerStorageTools } from './tools/storage.js';
+import { registerInterceptTools } from './tools/intercept.js';
+import { registerCleanupTools } from './tools/cleanup.js';
+import { registerBrowserTools } from './tools/browser.js';
+import { registerDebugTools } from './tools/debug.js';
+
 // ─── Bootstrap ──────────────────────────────────────────────────────
 
 const VERSION = '5.0.0-alpha.1';
@@ -98,6 +111,20 @@ registry.register(
     },
   }),
 );
+
+// ─── Register All Tool Modules ──────────────────────────────────────
+
+registerTabsTools(registry, ctx);
+registerPageTools(registry, ctx);
+registerInteractTools(registry, ctx);
+registerExecuteTools(registry, ctx);
+registerObserveTools(registry, ctx);
+registerEmulateTools(registry, ctx);
+registerStorageTools(registry, ctx);
+registerInterceptTools(registry, ctx);
+registerCleanupTools(registry, ctx);
+registerBrowserTools(registry, ctx);
+registerDebugTools(registry, ctx);
 
 // ─── MCP Server ─────────────────────────────────────────────────────
 
