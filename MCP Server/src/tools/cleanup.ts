@@ -270,9 +270,24 @@ async function handleStatus(
   const more =
     tabs.length > 10 ? `\n  ... and ${tabs.length - 10} more` : '';
 
+  // Issue #15: Show per-session TTL remaining
+  const ttl = ctx.config.sessionTTL;
+  const now = Date.now();
+  let sessionSummary = `Agent sessions: ${ctx.sessions.size}`;
+  if (ctx.sessions.size > 0) {
+    sessionSummary += `\nSession TTL: ${ttl / 1000}s`;
+    for (const [id, s] of ctx.sessions) {
+      const remaining = Math.max(0, ttl - (now - s.lastActivity));
+      const remainingSec = Math.round(remaining / 1000);
+      const tabCount = s.tabIds.size;
+      const warning = remainingSec < 60 ? ' ⚠ EXPIRING SOON' : '';
+      sessionSummary += `\n  ${id.substring(0, 8)}… — TTL: ${remainingSec}s remaining, ${tabCount} tab(s), strategy: ${s.cleanupStrategy || 'detach'}${warning}`;
+    }
+  }
+
   return ok(
     `Browser tabs: ${tabs.length}\n` +
-      `Agent sessions: ${ctx.sessions.size}\n` +
+      sessionSummary + '\n' +
       `Connection health: ${ctx.healthMonitor.health.status} (failures: ${ctx.healthMonitor.health.failures})\n` +
       `Temp dir: ${tempDir || '(not set)'}\n` +
       `Temp files: ${tempCount}\n` +

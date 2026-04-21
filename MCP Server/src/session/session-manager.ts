@@ -77,6 +77,17 @@ export class SessionManager {
   }
 
   /**
+   * Returns milliseconds until the session expires, based on TTL and last activity.
+   * Returns 0 if the session is not found or already expired.
+   */
+  getTimeToExpiry(sessionId: string, ttl: number): number {
+    const session = this.sessions.get(sessionId);
+    if (!session) return 0;
+    const remaining = ttl - (Date.now() - session.lastActivity);
+    return Math.max(0, remaining);
+  }
+
+  /**
    * Sweep expired sessions whose lastActivity exceeds `ttl` ms.
    *
    * Mirrors sweepStaleSessions() from server.js:
@@ -91,17 +102,27 @@ export class SessionManager {
     onCleanup: (session: AgentSession) => Promise<void>,
   ): Promise<number> {
     const now = Date.now();
+    const WARNING_THRESHOLD = 60_000; // 60 seconds
     let swept = 0;
 
     for (const [id, session] of this.sessions) {
-      if (now - session.lastActivity > ttl) {
-        // "none" strategy → persist indefinitely, skip sweep entirely
-        if (session.cleanupStrategy === 'none') continue;
+      const elapsed = now - session.lastActivity;
 
+      // "none" strategy → persist indefinitely, skip sweep entirely
+      if (session.cleanupStrategy === 'none') continue;
+
+      if (elapsed > ttl) {
         await onCleanup(session);
         session.tabIds.clear();
         this.sessions.delete(id);
         swept++;
+      } else if (ttl - elapsed < WARNING_THRESHOLD) {
+        // Session is close to expiry — log a warning but don't expire yet
+        const remainingSec = Math.round((ttl - elapsed) / 1000);
+        console.warn(
+          `[session] Session ${id.substring(0, 8)}… expires in ${remainingSec}s — ` +
+            `${session.tabIds.size} tab(s) will be cleaned up (strategy: ${session.cleanupStrategy})`,
+        );
       }
     }
 
