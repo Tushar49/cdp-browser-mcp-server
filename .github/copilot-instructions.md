@@ -67,3 +67,25 @@ npm run lint         # ESLint
 | `src/connection/cdp-client.ts` | CDP WebSocket client |
 | `src/connection/health-monitor.ts` | Auto-reconnect |
 | `src/utils/error-handler.ts` | 17 actionable error types |
+
+## Testing
+- Unit tests: `src/__tests__/unit/` — test pure logic, no CDP
+- Integration tests: `src/__tests__/integration/` — test with real/mock browser
+- Benchmarks: `src/__tests__/benchmarks/` — speed comparison vs Playwright
+- Run all: `npm run test`
+- Add tests for any new module
+
+## Release Process
+1. Update version in `package.json`
+2. Update `CHANGELOG.md` with new version section
+3. Update README.md badges
+4. Run full test suite: `npm run test`
+5. Build: `npm run build`
+6. Tag: `git tag v{version}`
+7. Push: `git push && git push --tags`
+
+## Issue Triage
+- P0: Ship blocker — fix immediately
+- P1: Significant bug — fix in current sprint
+- P2: Improvement — schedule for next release
+- P3: Nice-to-have — backlog
