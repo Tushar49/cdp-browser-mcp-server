@@ -208,7 +208,13 @@ export class CDPClient extends EventEmitter {
 
   private _attachListeners(socket: WebSocket): void {
     socket.on('message', (raw: WebSocket.RawData) => {
-      const data = JSON.parse(raw.toString()) as CDPResponse | CDPEvent;
+      let data: CDPResponse | CDPEvent;
+      try {
+        data = JSON.parse(raw.toString()) as CDPResponse | CDPEvent;
+      } catch (err) {
+        this.emit('error', new Error(`Malformed CDP frame: ${raw.toString().substring(0, 200)}`));
+        return; // Don't crash — skip malformed frame
+      }
 
       // Response to a command we sent
       if ('id' in data && data.id !== undefined) {

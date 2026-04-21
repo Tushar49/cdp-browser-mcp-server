@@ -165,6 +165,67 @@ export interface ToolDefinition {
   handler: ToolHandler;
 }
 
+// ─── CDP Event Pipeline State ───────────────────────────────────────
+
+/** Tracked network request entry. */
+export interface NetworkRequestEntry {
+  id: string;
+  url: string;
+  method: string;
+  type: string;
+  ts: number;
+  status: number | null;
+  mimeType: string | null;
+  size: number | null;
+}
+
+/** Tracked download entry. */
+export interface DownloadEntry {
+  guid: string;
+  url: string;
+  suggestedFilename: string;
+  state: string;
+  receivedBytes: number;
+  totalBytes: number;
+  ts: number;
+}
+
+/** Pending JavaScript dialog info. */
+export interface PendingDialog {
+  type: string;
+  message: string;
+  defaultPrompt: string;
+  url: string;
+  ts: number;
+}
+
+/** Debugger paused state for a tab. */
+export interface PausedTabInfo {
+  reason: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- CDP callFrames are untyped
+  callFrames: any[];
+  hitBreakpoints: string[];
+  ts: number;
+}
+
+/** Pending fetch request info. */
+export interface FetchRequestInfo {
+  requestId: string;
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  resourceType: string;
+  ts: number;
+}
+
+/** File chooser handler callback. */
+export type FileChooserHandler = (
+  sessionId: string,
+  method: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- CDP event params are untyped
+  params: any,
+) => void;
+
 // ─── Dependency-Injection Context ───────────────────────────────────
 
 /**
@@ -207,4 +268,27 @@ export interface ServerContext {
 
   /** Per-tab ElementResolver for stable uid refs across snapshots. */
   elementResolvers: Map<string, ElementResolver>;
+
+  // ─── Event Pipeline State Stores ──────────────────────────────────
+
+  /** Per-session console log buffer (sessionId → log entries). */
+  consoleLogs: Map<string, Array<{ level: string; text: string; ts: number; url: string }>>;
+
+  /** Per-session network request tracker (sessionId → Map<requestId, request>). */
+  networkReqs: Map<string, Map<string, NetworkRequestEntry>>;
+
+  /** Per-session download tracker (sessionId → downloads). */
+  downloads: Map<string, DownloadEntry[]>;
+
+  /** Per-session pending dialog tracker (sessionId → dialogs). */
+  pendingDialogs: Map<string, PendingDialog[]>;
+
+  /** Per-session file chooser handler callbacks (sessionId → handlers). */
+  pendingFileChoosers: Map<string, FileChooserHandler[]>;
+
+  /** Per-session debugger pause state (sessionId → pause info). */
+  pausedTabs: Map<string, PausedTabInfo>;
+
+  /** Per-session pending fetch requests (sessionId → Map<requestId, info>). */
+  pendingFetchRequests: Map<string, Map<string, FetchRequestInfo>>;
 }

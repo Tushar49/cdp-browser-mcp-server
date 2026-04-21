@@ -17,6 +17,15 @@ export class TabSessionService {
   /** CDP sessionId → set of domains already enabled */
   private enabledDomains = new Map<string, Set<string>>();
 
+  /** OOP iframe child sessions: parentSessionId → Map<childTargetId, { sessionId, url }> */
+  private childSessions = new Map<string, Map<string, { sessionId: string; url: string }>>();
+
+  /** Reverse map: childSessionId → parentSessionId (for fast lookup) */
+  private childToParent = new Map<string, string>();
+
+  /** uid → childSessionId routing for cross-frame element resolution */
+  private refSessionRouting = new Map<string, Map<number, string>>();
+
   /**
    * Get (or create) a CDP session for a tab.
    *
@@ -70,11 +79,88 @@ export class TabSessionService {
     // Domain manager already tracks via ensureDomain if needed externally
   }
 
+  /**
+   * Enable Target.setAutoAttach on a tab session to discover OOP iframes.
+   */
+  async setupAutoAttach(cdpClient: CDPClient, tabId: string): Promise<void> {
+    const sessionId = await this.getSession(cdpClient, tabId);
+    try {
+      await cdpClient.send('Target.setAutoAttach', {
+        autoAttach: true,
+        waitForDebuggerOnStart: false,
+        flatten: true,
+      }, sessionId);
+    } catch {
+      // Older Chrome versions may not support auto-attach on page sessions
+    }
+  }
+
+  /** Track a child session (OOP iframe) under a parent session. */
+  addChildSession(parentSessionId: string, childTargetId: string, childSessionId: string, url: string): void {
+    let frames = this.childSessions.get(parentSessionId);
+    if (!frames) {
+      frames = new Map();
+      this.childSessions.set(parentSessionId, frames);
+    }
+    frames.set(childTargetId, { sessionId: childSessionId, url });
+    this.childToParent.set(childSessionId, parentSessionId);
+  }
+
+  /** Remove a child session when an OOP iframe detaches. */
+  removeChildSession(parentSessionId: string, childTargetIdOrSessionId: string): void {
+    const frames = this.childSessions.get(parentSessionId);
+    if (!frames) return;
+
+    // Try matching by targetId first, then by sessionId
+    if (frames.has(childTargetIdOrSessionId)) {
+      const info = frames.get(childTargetIdOrSessionId)!;
+      this.childToParent.delete(info.sessionId);
+      frames.delete(childTargetIdOrSessionId);
+    } else {
+      for (const [tid, info] of frames) {
+        if (info.sessionId === childTargetIdOrSessionId) {
+          this.childToParent.delete(info.sessionId);
+          frames.delete(tid);
+          break;
+        }
+      }
+    }
+  }
+
+  /** Get all child sessions (OOP iframes) for a parent session. */
+  getChildSessions(parentSessionId: string): Map<string, { sessionId: string; url: string }> {
+    return this.childSessions.get(parentSessionId) ?? new Map();
+  }
+
+  /** Store uid → childSessionId routing for cross-frame element interaction. */
+  setRefRouting(parentSessionId: string, routing: Map<number, string>): void {
+    this.refSessionRouting.set(parentSessionId, routing);
+  }
+
+  /** Get the child session that owns a given uid (for cross-frame commands). */
+  getRefSession(parentSessionId: string, uid: number): string | undefined {
+    return this.refSessionRouting.get(parentSessionId)?.get(uid);
+  }
+
+  /** Find the parent session ID for a child session. */
+  getParentSession(childSessionId: string): string | undefined {
+    return this.childToParent.get(childSessionId);
+  }
+
   /** Remove the session mapping for a tab (e.g. on tab close). */
   detach(tabId: string, cdpClient?: CDPClient): void {
     const sessionId = this.sessions.get(tabId);
     if (sessionId) {
       this.enabledDomains.delete(sessionId);
+      // Clean up child sessions for this tab
+      const children = this.childSessions.get(sessionId);
+      if (children) {
+        for (const info of children.values()) {
+          this.childToParent.delete(info.sessionId);
+        }
+        this.childSessions.delete(sessionId);
+      }
+      this.refSessionRouting.delete(sessionId);
       cdpClient?.unpoolSession(tabId);
     }
     this.sessions.delete(tabId);
@@ -94,6 +180,9 @@ export class TabSessionService {
   clear(): void {
     this.sessions.clear();
     this.enabledDomains.clear();
+    this.childSessions.clear();
+    this.childToParent.clear();
+    this.refSessionRouting.clear();
   }
 
   /** Iterate over all [tabId, sessionId] pairs. */

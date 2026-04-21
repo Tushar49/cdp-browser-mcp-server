@@ -78,7 +78,10 @@ const registry = new ToolRegistry();
 
 // Wire auto-reconnect: when the WebSocket drops, let HealthMonitor retry
 // and clear domain state since all sessions are invalidated
+let modalEventsWired = false;
+
 cdpClient.on('disconnected', () => {
+  modalEventsWired = false;
   domainManager.clearAll();
   snapshotCache.clear();
   tabSessionService.clear();
@@ -96,6 +99,9 @@ cdpClient.on('connected', () => {
 
 /** Subscribe to CDP events that populate modal state. */
 function wireModalEvents(serverCtx: ServerContext): void {
+  if (modalEventsWired) return; // Already wired — don't duplicate
+  modalEventsWired = true;
+
   const client = serverCtx.cdpClient;
 
   client.on('event', (event: { method: string; params: Record<string, unknown>; sessionId?: string }) => {
@@ -176,6 +182,13 @@ const ctx: ServerContext = {
   processSessionId: randomUUID(),
   snapshotCache,
   elementResolvers: new Map(),
+  consoleLogs: new Map(),
+  networkReqs: new Map(),
+  downloads: new Map(),
+  pendingDialogs: new Map(),
+  pendingFileChoosers: new Map(),
+  pausedTabs: new Map(),
+  pendingFetchRequests: new Map(),
 };
 
 // ─── Auto-connect with mutex (P0-2) ────────────────────────────────

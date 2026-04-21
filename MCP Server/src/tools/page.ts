@@ -87,6 +87,8 @@ interface PageArgs {
   script?: string;
   // bypass_csp
   enabled?: boolean;
+  // Snapshot diff
+  diff?: boolean;
   // Session params
   sessionId?: string;
   cleanupStrategy?: string;
@@ -105,6 +107,11 @@ async function handleGoto(ctx: ServerContext, args: PageArgs): Promise<ToolResul
 
   const result = await ctx.sendCommand('Page.navigate', { url: args.url }, sess) as Record<string, unknown>;
   if (result.errorText) return fail(`Navigation failed: ${result.errorText}`);
+
+  // Invalidate snapshot cache on navigation
+  if (ctx.snapshotCache) {
+    ctx.snapshotCache.invalidate(args.tabId);
+  }
 
   const waitUntil = args.waitUntil || 'load';
   const navTimeout = args.timeout || ctx.config.navigationTimeout;
@@ -270,15 +277,32 @@ async function handleSnapshot(ctx: ServerContext, args: PageArgs): Promise<ToolR
 
   // Get page title and URL
   let title = '';
-  let url = '';
+  let currentUrl = '';
   try {
     title = await evalTitle(ctx, sess);
-    url = await evalExpression(ctx, sess, 'location.href');
+    currentUrl = await evalExpression(ctx, sess, 'location.href');
   } catch {
     // Page may be transitioning
   }
 
-  const header = `Page: ${title}\nURL: ${url}\nElements: ${nodeCount}\n\n`;
+  // Diff mode: return only changes since last snapshot
+  if (args.diff && ctx.snapshotCache) {
+    const diffResult = ctx.snapshotCache.diff(args.tabId, snapshot);
+    // Store updated snapshot in cache after diffing
+    ctx.snapshotCache.set(args.tabId, snapshot, optimized, currentUrl);
+    if (diffResult.changed) {
+      return ok(`### Snapshot Changes (${diffResult.added} added, ${diffResult.removed} removed)\n${diffResult.lines.join('\n')}`);
+    } else {
+      return ok('No visible changes since last snapshot.');
+    }
+  }
+
+  // Store in cache
+  if (ctx.snapshotCache && args.tabId) {
+    ctx.snapshotCache.set(args.tabId, snapshot, optimized, currentUrl);
+  }
+
+  const header = `Page: ${title}\nURL: ${currentUrl}\nElements: ${nodeCount}\n\n`;
   return ok(header + snapshot);
 }
 
@@ -704,7 +728,7 @@ const PAGE_DESCRIPTION = [
   '- back: Navigate back in browser history (requires: tabId; optional: waitUntil, timeout)',
   '- forward: Navigate forward in browser history (requires: tabId; optional: waitUntil, timeout)',
   '- reload: Reload the current page (requires: tabId; optional: ignoreCache, waitUntil, timeout)',
-  '- snapshot: Capture accessibility tree snapshot with element refs for interaction (requires: tabId)',
+  '- snapshot: Capture accessibility tree snapshot with element refs for interaction (requires: tabId; optional: diff — return only changes since last snapshot)',
   '- screenshot: Take a screenshot of the page or a specific element (requires: tabId; optional: fullPage, quality, uid, type[png|jpeg], path — absolute file path to save to disk)',
   "- content: Extract text or HTML content from the page or an element (requires: tabId; optional: uid, selector, format[text|html|full] — 'full' returns complete document HTML with doctype)",
   "- set_content: Set the page's HTML content directly (requires: tabId, html)",
@@ -751,6 +775,7 @@ const PAGE_INPUT_SCHEMA = {
       description: "Absolute file path to save screenshot to disk (e.g. 'C:/screenshots/step1.png'). Returns file path instead of base64 image.",
     },
     uid: { type: 'number' as const, description: 'Element uid for screenshot/content.' },
+    diff: { type: 'boolean' as const, description: 'If true, return only changes since last snapshot on this tab.' },
     selector: { type: 'string' as const, description: 'CSS selector for content/wait.' },
     format: {
       type: 'string' as const,

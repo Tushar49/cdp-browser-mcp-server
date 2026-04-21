@@ -42,6 +42,23 @@ interface CDPAXNode {
 
 type CdpSend = (method: string, params?: object) => Promise<any>;
 
+/** Frame metadata used during multi-frame tree capture. */
+interface FrameInfo {
+  id: string | null;
+  url: string;
+  securityOrigin: string;
+}
+
+/** Result of capturing a full multi-frame accessibility tree. */
+export interface FullTreeResult {
+  /** Main frame nodes. */
+  mainNodes: AXNode[];
+  /** OOP iframe nodes keyed by child targetId. */
+  frameNodes: Map<string, { nodes: AXNode[]; url: string }>;
+  /** uid → childSessionId routing for cross-frame element resolution. */
+  refRouting: Map<number, string>;
+}
+
 // Roles that are purely structural/decorative — skipped during parsing
 const SKIP_ROLES = new Set([
   'none',

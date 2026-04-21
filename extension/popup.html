@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { width: 300px; padding: 16px; font-family: system-ui; }
+    h2 { margin: 0 0 8px; font-size: 16px; }
+    .status { padding: 8px; border-radius: 4px; margin: 8px 0; }
+    .connected { background: #e8f5e9; color: #2e7d32; }
+    .disconnected { background: #fce4ec; color: #c62828; }
+    .info { font-size: 12px; color: #666; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <h2>🌐 CDP Browser MCP</h2>
+  <div class="status disconnected" id="status">
+    ⏳ Extension loaded — MCP bridge not yet implemented
+  </div>
+  <div class="info">
+    <p>This extension will let AI agents control your browser without needing chrome://flags or --remote-debugging-port.</p>
+    <p><strong>Status:</strong> Scaffold only (v0.1.0)</p>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
