@@ -96,9 +96,15 @@ async function handleCall(
   let resolvedSession: string = sess;
 
   if (params.uid !== undefined) {
-    // Use DOM.resolveNode to get objectId from backendNodeId via the ref map
+    // Resolve uid → backendNodeId via the per-tab ElementResolver
+    const tabId = params.tabId as string;
+    const resolver = ctx.elementResolvers.get(tabId);
+    const backendNodeId = resolver?.resolve(params.uid as number);
+    if (!backendNodeId) {
+      return fail(`Element ref=${params.uid} not found. Take a fresh snapshot.`);
+    }
     const resolveResult = (await ctx.sendCommand('DOM.resolveNode', {
-      backendNodeId: params.uid as number,
+      backendNodeId,
     }, sess)) as Record<string, unknown>;
     const obj = resolveResult.object as Record<string, unknown> | undefined;
     objectId = obj?.objectId as string | undefined;

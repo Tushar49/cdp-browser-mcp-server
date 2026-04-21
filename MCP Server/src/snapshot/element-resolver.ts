@@ -36,7 +36,7 @@ export class ElementResolver {
   private walkAndAssign(nodes: AXNode[]): void {
     for (const node of nodes) {
       const backendId = node.backendNodeId;
-      if (backendId) {
+      if (backendId && backendId !== 0) {
         const existingUid = this.backendIdToUid.get(backendId);
         if (existingUid !== undefined) {
           // Reuse existing uid for this backendNodeId
@@ -48,10 +48,9 @@ export class ElementResolver {
           this.uidToBackendId.set(uid, backendId);
           this.backendIdToUid.set(backendId, uid);
         }
-      } else {
-        // No backendNodeId — assign a uid but can't resolve later
-        node.uid = this.nextUid++;
       }
+      // Nodes with backendNodeId === 0 or undefined don't get a uid —
+      // they aren't resolvable and would cause stale ref errors
 
       if (node.children) {
         this.walkAndAssign(node.children);

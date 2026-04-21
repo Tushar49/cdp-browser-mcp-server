@@ -78,5 +78,16 @@ export async function preprocessToolCall(
   args._agentSessionId = sessionId;
   args._agentSession = session;
 
+  // 6. Resolve CDP target session for tab-bound tools
+  if (tabId) {
+    try {
+      const cdpSessionId = await ctx.tabSessions.getSession(ctx.cdpClient, tabId);
+      args._sessionId = cdpSessionId;
+    } catch {
+      // Tab may not be attachable (e.g., chrome:// pages)
+      // Don't fail — some tools don't need a CDP session
+    }
+  }
+
   return args;
 }

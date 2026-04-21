@@ -51,11 +51,7 @@ interface FieldResult {
 // ─── CDP Session Helper ─────────────────────────────────────────────
 
 async function getTabSession(ctx: ServerContext, tabId: string): Promise<string> {
-  const { sessionId } = await ctx.sendCommand('Target.attachToTarget', {
-    targetId: tabId,
-    flatten: true,
-  }) as { sessionId: string };
-  return sessionId;
+  return ctx.tabSessions.getSession(ctx.cdpClient, tabId);
 }
 
 // ─── Resolve uid → objectId via backendNodeId ───────────────────────
@@ -115,9 +111,10 @@ async function getAXNodeInfo(
     throw Errors.staleRef(uid);
   }
 
-  // Get the AX node info for this specific backendNodeId
-  const { nodes } = await ctx.sendCommand('Accessibility.getFullAXTree', {
-    max_depth: 1, backendNodeId,
+  // Use partial tree scoped to the target node (avoids fetching full page tree)
+  const { nodes } = await ctx.sendCommand('Accessibility.getPartialAXTree', {
+    backendNodeId,
+    fetchRelatives: false,
   }, sess) as {
     nodes: Array<{
       nodeId: string;

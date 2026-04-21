@@ -10,6 +10,42 @@ import type { ServerContext, ToolResult } from '../types.js';
 import { defineTool } from './base-tool.js';
 import { ok, fail } from '../utils/helpers.js';
 
+// ─── Auto-continue safety for stale paused requests ─────────────────
+
+/** Tracks paused requests: requestId → timestamp when paused */
+const pausedRequests = new Map<string, number>();
+const AUTO_CONTINUE_MS = 30_000;
+let safetyInterval: ReturnType<typeof setInterval> | null = null;
+let safetyCtx: ServerContext | null = null;
+let safetySess: string | null = null;
+
+function startSafetyInterval(ctx: ServerContext, sess: string): void {
+  // Only one interval at a time
+  if (safetyInterval) return;
+  safetyCtx = ctx;
+  safetySess = sess;
+  safetyInterval = setInterval(() => {
+    const now = Date.now();
+    for (const [reqId, ts] of pausedRequests) {
+      if (now - ts > AUTO_CONTINUE_MS) {
+        pausedRequests.delete(reqId);
+        safetyCtx?.sendCommand('Fetch.continueRequest', { requestId: reqId }, safetySess ?? undefined)
+          .catch(() => { /* request may have been handled already */ });
+      }
+    }
+  }, 5_000);
+}
+
+function stopSafetyInterval(): void {
+  if (safetyInterval) {
+    clearInterval(safetyInterval);
+    safetyInterval = null;
+  }
+  pausedRequests.clear();
+  safetyCtx = null;
+  safetySess = null;
+}
+
 // ─── Action handlers ────────────────────────────────────────────────
 
 async function handleEnable(
@@ -26,7 +62,10 @@ async function handleEnable(
 
   await ctx.sendCommand('Fetch.enable', { patterns: fetchPatterns }, sess);
 
-  return ok(`Request interception enabled.\nPatterns: ${patterns.join(', ')}\nPaused requests will auto-continue after 10s if not handled.`);
+  // Start auto-continue safety interval
+  startSafetyInterval(ctx, sess);
+
+  return ok(`⚠️ Experimental: Request interception enabled.\nPatterns: ${patterns.join(', ')}\nPaused requests that aren't handled within 30s will be auto-continued to prevent page hangs.\nAlways call intercept.disable() when done.`);
 }
 
 async function handleDisable(
@@ -35,6 +74,7 @@ async function handleDisable(
 ): Promise<ToolResult> {
   const sess = params._sessionId as string;
   await ctx.sendCommand('Fetch.disable', {}, sess);
+  stopSafetyInterval();
   return ok('Request interception disabled.');
 }
 
@@ -55,6 +95,7 @@ async function handleContinue(
     );
   }
 
+  pausedRequests.delete(params.requestId as string);
   await ctx.sendCommand('Fetch.continueRequest', cdpParams, sess);
   return ok(`Request ${params.requestId} continued${params.url ? ` (redirected to ${params.url})` : ''}.`);
 }
@@ -84,6 +125,7 @@ async function handleFulfill(
     cdpParams.body = Buffer.from(params.body as string).toString('base64');
   }
 
+  pausedRequests.delete(params.requestId as string);
   await ctx.sendCommand('Fetch.fulfillRequest', cdpParams, sess);
   return ok(`Request ${params.requestId} fulfilled with status ${responseCode}.`);
 }
@@ -96,6 +138,7 @@ async function handleFail(
   const sess = params._sessionId as string;
 
   const reason = (params.reason as string) || 'Failed';
+  pausedRequests.delete(params.requestId as string);
   await ctx.sendCommand('Fetch.failRequest', {
     requestId: params.requestId as string,
     reason,
@@ -108,14 +151,21 @@ async function handleList(
   ctx: ServerContext,
   params: Record<string, unknown>,
 ): Promise<ToolResult> {
-  // Pending intercepted requests are tracked in memory by the runtime layer.
-  // The Fetch domain events (Fetch.requestPaused) populate the pending map.
-  // This stub returns the structure; the runtime integration fills the data.
   void ctx;
   void params;
 
-  // In the full server, pending requests come from an in-memory Map keyed by session.
-  return ok('No pending intercepted requests.');
+  if (pausedRequests.size === 0) {
+    return ok('No pending intercepted requests.');
+  }
+
+  const now = Date.now();
+  const lines = [...pausedRequests.entries()].map(([reqId, ts]) => {
+    const age = ((now - ts) / 1000).toFixed(1);
+    const remaining = Math.max(0, (AUTO_CONTINUE_MS - (now - ts)) / 1000).toFixed(0);
+    return `  ${reqId} — paused ${age}s ago (auto-continue in ${remaining}s)`;
+  });
+
+  return ok(`${pausedRequests.size} paused request(s):\n${lines.join('\n')}`);
 }
 
 // ─── Registration ───────────────────────────────────────────────────
@@ -128,7 +178,7 @@ export function registerInterceptTools(
     defineTool({
       name: 'intercept',
       description: [
-        'Use this to mock API responses, block requests, or modify network traffic in real-time. Call enable first, then handle paused requests with continue/fulfill/fail.',
+        '⚠️ Experimental: Request interception requires careful use. Paused requests that aren\'t handled within 30s will be auto-continued to prevent page hangs. Always call intercept.disable() when done.',
         '',
         'Operations:',
         "- enable: Start intercepting requests matching URL patterns (requires: tabId; optional: patterns — array of URL glob patterns, e.g. ['*.api.example.com/*'])",

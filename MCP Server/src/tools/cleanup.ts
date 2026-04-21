@@ -28,8 +28,15 @@ async function handleDisconnectTab(
     );
   }
 
-  // Release the tab lock (CDP session detach will be handled by the caller/context)
+  // Release the tab lock and clean up per-tab state
   ctx.tabOwnership.release(tabId);
+  ctx.elementResolvers.delete(tabId);
+  ctx.tabSessions.detach(tabId, ctx.cdpClient);
+  ctx.snapshotCache.invalidate(tabId);
+  // Remove from session's tabIds
+  const session = args._agentSession as { tabIds: Set<string> } | undefined;
+  if (session) session.tabIds.delete(tabId);
+
   return ok('Detached from tab.');
 }
 
@@ -163,6 +170,9 @@ async function handleSession(
     if (lock.origin === 'claimed') {
       // Pre-existing tabs: release lock + detach, never close
       ctx.tabOwnership.release(tid);
+      ctx.elementResolvers.delete(tid);
+      ctx.tabSessions.detach(tid, ctx.cdpClient);
+      ctx.snapshotCache.invalidate(tid);
       cleaned++;
     } else {
       // Created tabs: apply cleanup strategy
@@ -179,6 +189,9 @@ async function handleSession(
         // detach
         ctx.tabOwnership.release(tid);
       }
+      ctx.elementResolvers.delete(tid);
+      ctx.tabSessions.detach(tid, ctx.cdpClient);
+      ctx.snapshotCache.invalidate(tid);
       cleaned++;
     }
   }
@@ -214,6 +227,9 @@ async function handleReset(
       if (lock.origin === 'claimed') {
         // NEVER close pre-existing tabs
         ctx.tabOwnership.release(tid);
+        ctx.elementResolvers.delete(tid);
+        ctx.tabSessions.detach(tid, ctx.cdpClient);
+        ctx.snapshotCache.invalidate(tid);
         preservedCount++;
       } else if (lock.origin === 'created' && closeTabs) {
         try {
@@ -222,9 +238,15 @@ async function handleReset(
           /* ok */
         }
         ctx.tabOwnership.release(tid);
+        ctx.elementResolvers.delete(tid);
+        ctx.tabSessions.detach(tid, ctx.cdpClient);
+        ctx.snapshotCache.invalidate(tid);
         closedCount++;
       } else {
         ctx.tabOwnership.release(tid);
+        ctx.elementResolvers.delete(tid);
+        ctx.tabSessions.detach(tid, ctx.cdpClient);
+        ctx.snapshotCache.invalidate(tid);
         detachedCount++;
       }
     }

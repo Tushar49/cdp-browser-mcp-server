@@ -562,16 +562,10 @@ async function handleAddStyle(ctx: ServerContext, args: PageArgs): Promise<ToolR
 // ─── Internal Helpers ───────────────────────────────────────────────
 
 /**
- * Get or create a CDP session for a tab.
- * TODO: Wire full session management (tab locks, auto-attach) when integration is complete.
+ * Get or create a CDP session for a tab via the shared TabSessionService.
  */
 async function getTabSession(ctx: ServerContext, tabId: string): Promise<string> {
-  // For now, attach to the target and return the session ID
-  const { sessionId } = await ctx.sendCommand('Target.attachToTarget', {
-    targetId: tabId,
-    flatten: true,
-  }) as { sessionId: string };
-  return sessionId;
+  return ctx.tabSessions.getSession(ctx.cdpClient, tabId);
 }
 
 /** Enable a CDP domain if not already enabled. */

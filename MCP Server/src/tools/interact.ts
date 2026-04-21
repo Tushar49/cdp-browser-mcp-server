@@ -685,15 +685,10 @@ async function handleTap(ctx: ServerContext, args: InteractArgs): Promise<ToolRe
 // ─── Internal Helpers ───────────────────────────────────────────────
 
 /**
- * Get or create a CDP session for a tab.
- * TODO: Wire full session management when integration is complete.
+ * Get or create a CDP session for a tab via the shared TabSessionService.
  */
 async function getTabSession(ctx: ServerContext, tabId: string): Promise<string> {
-  const { sessionId } = await ctx.sendCommand('Target.attachToTarget', {
-    targetId: tabId,
-    flatten: true,
-  }) as { sessionId: string };
-  return sessionId;
+  return ctx.tabSessions.getSession(ctx.cdpClient, tabId);
 }
 
 /**

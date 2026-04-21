@@ -196,10 +196,17 @@ async function handleSetDomBreakpoint(ctx: ServerContext, p: Record<string, unkn
   if (!p.type) return fail("Provide 'type': 'subtree-modified', 'attribute-modified', or 'node-removed'.");
   const sess = p._sessionId as string;
 
-  // Resolve backendNodeId from uid via the ref map, then push to DOM nodeId
+  // Resolve uid → backendNodeId via ElementResolver
+  const tabId = p.tabId as string;
+  const resolver = ctx.elementResolvers.get(tabId);
+  const backendNodeId = resolver?.resolve(p.uid as number);
+  if (!backendNodeId) {
+    return fail(`Element ref=${p.uid} not found. Take a fresh snapshot.`);
+  }
+
   await ctx.sendCommand('DOM.getDocument', { depth: 0 }, sess);
   const resolveResult = (await ctx.sendCommand('DOM.resolveNode', {
-    backendNodeId: p.uid as number,
+    backendNodeId,
   }, sess)) as Record<string, unknown>;
 
   if (!resolveResult.object) {
@@ -208,7 +215,7 @@ async function handleSetDomBreakpoint(ctx: ServerContext, p: Record<string, unkn
 
   // Get nodeId via pushNodesByBackendIds
   const pushResult = (await ctx.sendCommand('DOM.pushNodesByBackendIds', {
-    backendNodeIds: [p.uid as number],
+    backendNodeIds: [backendNodeId],
   }, sess)) as Record<string, unknown>;
   const nodeIds = pushResult.nodeIds as number[] | undefined;
   const nodeId = nodeIds?.[0];
@@ -232,9 +239,17 @@ async function handleRemoveDomBreakpoint(ctx: ServerContext, p: Record<string, u
   if (!p.type) return fail("Provide 'type'.");
   const sess = p._sessionId as string;
 
+  // Resolve uid → backendNodeId via ElementResolver
+  const tabId = p.tabId as string;
+  const resolver = ctx.elementResolvers.get(tabId);
+  const backendNodeId = resolver?.resolve(p.uid as number);
+  if (!backendNodeId) {
+    return fail(`Element ref=${p.uid} not found. Take a fresh snapshot.`);
+  }
+
   await ctx.sendCommand('DOM.getDocument', { depth: 0 }, sess);
   const pushResult = (await ctx.sendCommand('DOM.pushNodesByBackendIds', {
-    backendNodeIds: [p.uid as number],
+    backendNodeIds: [backendNodeId],
   }, sess)) as Record<string, unknown>;
   const nodeIds = pushResult.nodeIds as number[] | undefined;
   const nodeId = nodeIds?.[0];

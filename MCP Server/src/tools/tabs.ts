@@ -328,6 +328,15 @@ async function handleClose(
   // Detach CDP session if attached, then close the target
   ctx.tabOwnership.release(tabId);
   await ctx.sendCommand('Target.closeTarget', { targetId: tabId });
+
+  // Clean up per-tab state
+  ctx.elementResolvers.delete(tabId);
+  ctx.tabSessions.detach(tabId, ctx.cdpClient);
+  ctx.snapshotCache.invalidate(tabId);
+  // Remove from session's tabIds
+  const session = args._agentSession as { tabIds: Set<string> } | undefined;
+  if (session) session.tabIds.delete(tabId);
+
   return ok('Tab closed.');
 }
 
