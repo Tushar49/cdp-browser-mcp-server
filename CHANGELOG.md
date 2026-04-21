@@ -2,6 +2,51 @@
 
 All notable changes to CDP Browser MCP Server will be documented in this file.
 
+## [5.0.0-alpha.1] — 2026-04-21
+
+### 🚀 Complete Architecture Restructure
+
+**Breaking Changes:**
+- Entry point changed from `server.js` to `dist/index.js` (legacy `server.js` still works via `npm run start:legacy`)
+- Default `cleanupStrategy` changed from `"close"` to `"detach"` — tabs now persist after session expiry
+- Default timeout increased from 30s to 60s
+
+### Added
+- **Smart Form Filling** (`form` tool) — handles text, combobox, checkbox, radio, select, date in a single call. Auto-detects field type. React/Greenhouse combobox support with smart matching.
+- **Auto-Connect** — server automatically discovers and connects to Chrome/Edge/Brave on first tool call. No more `browser.connect()` needed.
+- **Stable Element Refs** — uids persist across snapshots within the same page (cumulative ElementResolver)
+- **JS-Click Fallback** — click automatically falls back to JavaScript `el.click()` for framework sites (LinkedIn, React, Angular)
+- **Token-Optimized Snapshots** — role filtering, depth limiting, text truncation. 34KB → ~15KB average.
+- **Actionable Errors** — 17 error types with "How to fix" suggestions
+- **Modal State System** — dialogs/file choosers block other tools with recovery instructions
+- **Auto-Reconnect** — exponential backoff reconnection on browser disconnect
+- **Lazy Domain Enablement** — CDP domains enabled on first use, not at connect time
+- **Snapshot Caching** — per-tab cache with line-level diffing
+- **Agent Guidance** — all 12 tool descriptions include usage guidance and common pitfalls
+- **Dispatch Preprocessing** — session routing, tab claiming, modal checks on every tool call
+- **Connection Mutex** — prevents concurrent socket opens
+- **Tab Session Pooling** — reuse CDP sessions per tab
+- **Response Builder** — progressive truncation for LLM token budgets
+- **Profile-Aware Tabs** — `tabs.new({ profile: "Work" })` opens in specific browser profile
+
+### Changed
+- Architecture: 1 file (254KB) → 36 TypeScript modules (8,844 lines)
+- TypeScript with strict mode
+- Tiered timeouts: action=10s, navigation=60s, snapshot=15s
+- Console errors from Chrome extensions automatically filtered
+- `tabs.list()` auto-shows all tabs when session has none
+- Session expiry warnings at <60s TTL
+
+### Fixed
+- Element refs going stale between snapshot and interaction
+- React comboboxes not selecting values (Greenhouse, Lever)
+- LinkedIn clicks not triggering (Ember.js framework)
+- Fresh tabs opening to about:blank
+- D365/SharePoint timing out at 30s
+- 34KB+ snapshots overwhelming LLM context
+- Agents not knowing how to connect
+- Tabs auto-closing when session expires
+
 ## [4.13.0] — 2026-03-29
 
 ### Added — Popup-Aware File Upload
