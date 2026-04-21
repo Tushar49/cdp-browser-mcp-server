@@ -18,6 +18,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { loadConfig } from './config.js';
 import { CDPClient } from './connection/cdp-client.js';
+import { ModalStateManager } from './session/modal-state.js';
 import { HealthMonitor } from './connection/health-monitor.js';
 import { ToolRegistry } from './tools/registry.js';
 import { defineTool, success } from './tools/base-tool.js';
@@ -35,6 +36,7 @@ import { registerInterceptTools } from './tools/intercept.js';
 import { registerCleanupTools } from './tools/cleanup.js';
 import { registerBrowserTools } from './tools/browser.js';
 import { registerDebugTools } from './tools/debug.js';
+import { registerFormTools } from './tools/form.js';
 
 // ─── Bootstrap ──────────────────────────────────────────────────────
 
@@ -69,6 +71,7 @@ const ctx: ServerContext = {
     cdpClient.send(method, params ?? {}, sessionId),
   sessions: new Map(),
   tabLocks: new Map(),
+  modalStates: new ModalStateManager(),
   processSessionId: randomUUID(),
 };
 
@@ -125,8 +128,9 @@ registerInterceptTools(registry, ctx);
 registerCleanupTools(registry, ctx);
 registerBrowserTools(registry, ctx);
 registerDebugTools(registry, ctx);
+registerFormTools(registry, ctx);
 
-// ─── MCP Server ─────────────────────────────────────────────────────
+// ─── MCP Server─────────────────────────────────────────────────────
 
 const server = new Server(
   { name: 'cdp-browser', version: VERSION },

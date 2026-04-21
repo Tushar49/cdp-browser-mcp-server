@@ -175,7 +175,7 @@ export function registerStorageTools(
     defineTool({
       name: 'storage',
       description: [
-        'Cookie and storage management: get, set, and delete cookies, clear browser storage, and check storage quota.',
+        'Use this to manage cookies and browser storage — inspect auth tokens, set test cookies, or clear site data for a clean state.',
         '',
         'Operations:',
         '- get_cookies: Retrieve cookies (requires: tabId; optional: urls — filter by URLs)',

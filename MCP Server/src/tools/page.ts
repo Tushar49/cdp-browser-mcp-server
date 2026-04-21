@@ -601,7 +601,11 @@ const PAGE_ACTIONS: Record<string, (ctx: ServerContext, args: PageArgs) => Promi
 // ─── Tool Registration ──────────────────────────────────────────────
 
 const PAGE_DESCRIPTION = [
-  'Page-level operations: navigation, accessibility snapshots, screenshots, content extraction, waiting, PDF export, dialog handling, script injection, CSS injection, and CSP bypass.',
+  'Page operations. Take a snapshot before interacting — it gives you uid refs for elements.',
+  '',
+  'For slow pages (D365, SharePoint), the default 60s timeout should work. Use timeout parameter for even slower pages.',
+  '',
+  'The snapshot is optimized for LLM consumption — decorative elements are filtered out.',
   '',
   'Operations:',
   '- goto: Navigate to a URL and wait for page load (requires: tabId, url; optional: waitUntil[load|domcontentloaded|networkidle|commit], timeout)',

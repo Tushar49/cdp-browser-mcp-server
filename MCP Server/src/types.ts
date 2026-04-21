@@ -8,6 +8,7 @@
 
 import type { CDPClient } from './connection/cdp-client.js';
 import type { HealthMonitor } from './connection/health-monitor.js';
+import type { ModalStateManager } from './session/modal-state.js';
 
 // ─── Cleanup Strategy ───────────────────────────────────────────────
 
@@ -182,6 +183,9 @@ export interface ServerContext {
 
   /** Map of tab target IDs → locking info. */
   tabLocks: Map<string, { sessionId: string; origin: 'created' | 'claimed' }>;
+
+  /** Tracks tab-level modal states (dialogs, file choosers, debugger pauses). */
+  modalStates: ModalStateManager;
 
   /** Per-process fallback session ID. */
   processSessionId: string;

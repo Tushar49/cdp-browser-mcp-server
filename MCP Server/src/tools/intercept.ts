@@ -128,7 +128,7 @@ export function registerInterceptTools(
     defineTool({
       name: 'intercept',
       description: [
-        'HTTP request interception via CDP Fetch domain. Intercept, modify, mock, or block network requests in real-time.',
+        'Use this to mock API responses, block requests, or modify network traffic in real-time. Call enable first, then handle paused requests with continue/fulfill/fail.',
         '',
         'Operations:',
         "- enable: Start intercepting requests matching URL patterns (requires: tabId; optional: patterns — array of URL glob patterns, e.g. ['*.api.example.com/*'])",

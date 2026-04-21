@@ -238,7 +238,7 @@ export function registerObserveTools(
     defineTool({
       name: 'observe',
       description: [
-        'Monitor browser console messages, network requests, retrieve full request/response bodies, measure page performance metrics, and export HAR.',
+        'Use this to debug page behavior — check console errors, inspect API calls, or measure performance. Monitoring starts automatically when queried.',
         '',
         'Operations:',
         '- console: Retrieve captured console messages (requires: tabId; optional: level[all|error|warning|log|info|debug], last — return only last N entries, clear — clear after returning)',

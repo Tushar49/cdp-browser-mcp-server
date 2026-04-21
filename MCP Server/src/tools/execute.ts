@@ -147,7 +147,10 @@ export function registerExecuteTools(
     defineTool({
       name: 'execute',
       description: [
-        'Execute JavaScript code on the page in three modes: inline expression evaluation, async script execution, and calling a function on a specific element.',
+        "Run JavaScript on the page. Use this when standard tools can't handle a specific interaction.",
+        '',
+        "For clicking elements that don't respond to CDP clicks (rare):",
+        "  execute({ action: 'call', uid: 5, function: '(el) => el.click()' })",
         '',
         'Operations:',
         '- eval: Evaluate a JavaScript expression and return its value (requires: tabId, expression)',

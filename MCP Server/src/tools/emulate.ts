@@ -202,9 +202,9 @@ export function registerEmulateTools(
     defineTool({
       name: 'emulate',
       description: [
-        "Emulate device characteristics and network conditions: viewport size, color scheme, user agent, geolocation, CPU throttle, timezone, locale, vision deficiency simulation, network throttling, SSL bypass, URL blocking, and custom headers. Pass 'reset: true' to clear all overrides.",
+        "Use this to test responsive design, mobile views, or simulate slow networks. Set any combination of properties in one call. Pass 'reset: true' to clear all overrides.",
         '',
-        'Operations (set any combination of properties in a single call):',
+        'Operations (set any combination in a single call):',
         '- viewport: Set viewport dimensions (optional: {width, height, deviceScaleFactor, mobile, touch, landscape})',
         '- colorScheme: Emulate preferred color scheme (optional: dark|light|auto)',
         '- userAgent: Override the browser user agent string (optional: string)',

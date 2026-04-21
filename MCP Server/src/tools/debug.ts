@@ -304,7 +304,7 @@ export function registerDebugTools(
     defineTool({
       name: 'debug',
       description: [
-        'JavaScript debugger, resource overrides, and DOM/event breakpoints. Uses CDP Debugger and DOMDebugger domains.',
+        'Use this to debug JavaScript issues — set breakpoints, step through code, inspect variables, or override resources. Call enable first before setting breakpoints.',
         '',
         'Debugger operations:',
         '- enable: Enable JavaScript debugger for a tab — starts tracking scripts and allows breakpoints (requires: tabId)',
