@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-5.0.0--alpha.1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-5.0.0--alpha.2-blue" alt="Version">
   <img src="https://img.shields.io/badge/tools-14-green" alt="Tools">
   <img src="https://img.shields.io/badge/sub--actions-90+-green" alt="Actions">
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen" alt="Node">
@@ -62,6 +62,11 @@ CDP Browser MCP Server connects to your **already-running** browser over a WebSo
 | 📊 **Snapshot Caching** | Per-tab cache for snapshot reuse — reduces redundant tree captures |
 | 🤖 **Agent Guidance** | All 14 tool descriptions include usage guidance and common pitfalls |
 | 🧹 **Default: Detach** | Tabs never auto-close when session expires — agents can't accidentally kill your tabs |
+| 🖼️ **Cross-Origin Iframes** | OOP iframes auto-discovered via `Target.setAutoAttach` — visible in snapshots with `[frame N]` prefixes |
+| 📂 **File Chooser Interception** | Programmatic uploads via `Page.handleFileChooser`, popup monitoring for Google Picker/Dropbox |
+| 📌 **Profile-Sticky Sessions** | Sessions auto-pin to Chrome profile on first tab interaction — new tabs always open in the right profile |
+| 🖥️ **Cross-Platform Support** | macOS, Linux, and Windows browser discovery for Chrome, Edge, Brave, Chromium |
+| 🧩 **Chrome Extension** | Manifest V3 scaffold with service worker and popup UI (bridge coming in v5.1) |
 
 ---
 
@@ -693,10 +698,10 @@ A: No. It connects directly to Chrome via CDP WebSocket. Only dependencies are `
 A: Yes. Each agent process is automatically assigned an isolated session — no configuration needed. Sessions auto-expire after 5 minutes. Pass a custom `sessionId` to reconnect to a previous session.
 
 **Q: Does it work with Chrome profiles / corporate Chrome?**  
-A: Yes. The `browser` tool detects all running Chrome instances and their profiles. Use `browser.profiles` to see available instances and `browser.connect` to switch between them. Use `tabs.new` with the `profile` parameter to create tabs in a specific profile (e.g. `profile: "Work"` or `profile: "mansha@gmail.com"`). All Chrome profiles within one instance share a single debug port — each profile's tabs are distinguishable via `browserContextId` in `tabs.info`.
+A: Yes. The `browser` tool detects all running Chrome instances and their profiles. Use `browser.profiles` to see available instances and `browser.connect` to switch between them. Use `tabs.new` with the `profile` parameter to create tabs in a specific profile (e.g. `profile: "Work"` or `profile: "mansha@gmail.com"`). Sessions auto-pin to a Chrome profile on first tab interaction — all new tabs opened by the session will stay in that profile, even if the user manually switches profiles. Use `tabs.set_profile` to explicitly change the pinned profile. All Chrome profiles within one instance share a single debug port — each profile's tabs are distinguishable via `browserContextId` in `tabs.info`.
 
 **Q: What about iframes and Shadow DOM?**  
-A: The snapshot uses `Accessibility.getFullAXTree()` which captures the full accessibility tree including shadow DOM and iframes. Element refs (uid) work across frames — use `uid` from snapshots to interact with iframe elements. CSS selectors only find top-level elements.
+A: The snapshot uses `Accessibility.getFullAXTree()` which captures the full accessibility tree including shadow DOM and iframes. Cross-origin (OOP) iframes are auto-discovered via `Target.setAutoAttach` and appear in snapshots with `[frame N]` prefixes. Element refs (uid) work across frames — use `uid` from snapshots to interact with iframe elements. CSS selectors only find top-level elements.
 
 **Q: Does it support touch events?**  
 A: Yes. Use `interact.tap` to dispatch touch events (`touchStart` + `touchEnd`) on elements, with full actionability checks and auto-retry. Use `emulate` with `viewport: { touch: true }` to enable touch emulation.

@@ -2,6 +2,27 @@
 
 All notable changes to CDP Browser MCP Server will be documented in this file.
 
+## [5.0.0-alpha.2] - 2026-04-22
+
+### Added
+- **Cross-origin iframe support** — `Target.setAutoAttach` auto-discovers OOP iframe targets, multi-frame snapshots with `[frame N]` prefixes, frame-aware uid resolution
+- **File chooser interception** — `Page.fileChooserOpened` → modal state blocking, `Page.handleFileChooser` for programmatic uploads, popup window monitoring for Google Picker/Dropbox, shadow DOM traversal for hidden inputs
+- **CDP event pipeline** — Full event routing: console, network, downloads, dialogs, file choosers, debugger pause/resume, Target attach/detach all wired to ServerContext state stores
+- **Profile-sticky sessions** — Sessions auto-pin to Chrome profile on first tab interaction. New tabs always open in pinned profile even when user manually switches profiles
+- **`tabs.set_profile` action** — Explicitly switch a session's pinned Chrome profile
+- **Snapshot diffing** — `page.snapshot({ diff: true })` returns only changes since last snapshot on the tab
+- **Chrome extension scaffold** — `extension/` directory with Manifest V3, service worker, popup UI (bridge not yet implemented)
+- **macOS/Linux browser discovery** — Cross-platform paths for Chrome, Edge, Brave, Chromium
+
+### Fixed
+- Modal event listener leak on reconnect (register once, reset on disconnect)
+- JSON.parse crash on malformed CDP frames (try-catch guard)
+- Snapshot cache now wired into page.snapshot (store, invalidate, diff)
+
+### Changed
+- Version bumped to 5.0.0-alpha.2
+- Tests: 142 → 146 (profile pinning tests added)
+
 ## [5.0.0-alpha.1] — 2026-04-21
 
 ### 🚀 Complete Architecture Restructure

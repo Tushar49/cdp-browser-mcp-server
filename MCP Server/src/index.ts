@@ -40,7 +40,7 @@ import { ToolRegistry } from './tools/registry.js';
 import { preprocessToolCall } from './tools/dispatch.js';
 import { defineTool, success } from './tools/base-tool.js';
 import { wrapError } from './utils/error-handler.js';
-import type { ServerContext } from './types.js';
+import type { ServerContext, FileChooserHandler } from './types.js';
 
 // Tool modules
 import { registerTabsTools } from './tools/tabs.js';
@@ -78,7 +78,12 @@ const registry = new ToolRegistry();
 
 // Wire auto-reconnect: when the WebSocket drops, let HealthMonitor retry
 // and clear domain state since all sessions are invalidated
+let modalEventsWired = false;
+let eventPipelineWired = false;
+
 cdpClient.on('disconnected', () => {
+  modalEventsWired = false;
+  eventPipelineWired = false;
   domainManager.clearAll();
   snapshotCache.clear();
   tabSessionService.clear();
@@ -87,15 +92,19 @@ cdpClient.on('disconnected', () => {
   });
 });
 
-// Wire modal state when connected
+// Wire modal state and event pipeline when connected
 cdpClient.on('connected', () => {
   wireModalEvents(ctx);
+  wireEventPipeline(ctx);
 });
 
 // ─── Modal State Wiring ─────────────────────────────────────────────
 
 /** Subscribe to CDP events that populate modal state. */
 function wireModalEvents(serverCtx: ServerContext): void {
+  if (modalEventsWired) return; // Already wired — don't duplicate
+  modalEventsWired = true;
+
   const client = serverCtx.cdpClient;
 
   client.on('event', (event: { method: string; params: Record<string, unknown>; sessionId?: string }) => {
@@ -160,6 +169,285 @@ function findTabBySession(serverCtx: ServerContext, sessionId?: string): string 
   return undefined;
 }
 
+// ─── CDP Event Pipeline ─────────────────────────────────────────────
+
+/**
+ * Subscribe to ALL CDP events and route them to the appropriate state stores.
+ *
+ * Ported from server.js `handleEvent()` — covers:
+ *  - Runtime.consoleAPICalled / exceptionThrown → consoleLogs
+ *  - Network.requestWillBeSent / responseReceived / loadingFinished → networkReqs
+ *  - Page.downloadWillBegin / downloadProgress → downloads
+ *  - Page.javascriptDialogOpening → pendingDialogs (+ auto-accept timeout)
+ *  - Page.fileChooserOpened → pendingFileChoosers callback dispatch
+ *  - Fetch.requestPaused → pendingFetchRequests
+ *  - Debugger.paused / resumed → pausedTabs
+ *  - Target.attachedToTarget / detachedFromTarget → child session tracking (OOP iframes)
+ */
+function wireEventPipeline(serverCtx: ServerContext): void {
+  if (eventPipelineWired) return;
+  eventPipelineWired = true;
+
+  const client = serverCtx.cdpClient;
+
+  client.on('event', (event: { method: string; params: Record<string, unknown>; sessionId?: string }) => {
+    const sessionId = event.sessionId ?? '';
+    const params = event.params;
+
+    switch (event.method) {
+      // ── Console messages ──
+      case 'Runtime.consoleAPICalled': {
+        const logs = serverCtx.consoleLogs.get(sessionId) || [];
+        const args = params.args as Array<{ value?: string; description?: string; type?: string }> | undefined;
+        logs.push({
+          level: params.type as string,
+          text: args?.map(a => a.value ?? a.description ?? a.type).join(' ') || '',
+          ts: Date.now(),
+          url: (params.stackTrace as { callFrames?: Array<{ url?: string }> })?.callFrames?.[0]?.url || '',
+        });
+        if (logs.length > 500) logs.splice(0, logs.length - 500);
+        serverCtx.consoleLogs.set(sessionId, logs);
+        break;
+      }
+
+      case 'Runtime.exceptionThrown': {
+        const logs = serverCtx.consoleLogs.get(sessionId) || [];
+        const details = params.exceptionDetails as {
+          exception?: { description?: string };
+          text?: string;
+          url?: string;
+        } | undefined;
+        logs.push({
+          level: 'error',
+          text: details?.exception?.description || details?.text || 'Unknown exception',
+          ts: Date.now(),
+          url: details?.url || '',
+        });
+        serverCtx.consoleLogs.set(sessionId, logs);
+        break;
+      }
+
+      // ── Network requests ──
+      case 'Network.requestWillBeSent': {
+        const reqs = serverCtx.networkReqs.get(sessionId) || new Map();
+        const reqId = params.requestId as string;
+        const request = params.request as { url: string; method: string };
+        reqs.set(reqId, {
+          id: reqId,
+          url: request.url,
+          method: request.method,
+          type: (params.type as string) || 'Other',
+          ts: Date.now(),
+          status: null,
+          mimeType: null,
+          size: null,
+        });
+        if (reqs.size > 300) {
+          const first = reqs.keys().next().value;
+          if (first !== undefined) reqs.delete(first);
+        }
+        serverCtx.networkReqs.set(sessionId, reqs);
+        break;
+      }
+
+      case 'Network.responseReceived': {
+        const reqs = serverCtx.networkReqs.get(sessionId);
+        const reqId = params.requestId as string;
+        if (reqs?.has(reqId)) {
+          const r = reqs.get(reqId)!;
+          const response = params.response as { status: number; mimeType: string };
+          r.status = response.status;
+          r.mimeType = response.mimeType;
+        }
+        break;
+      }
+
+      case 'Network.loadingFinished': {
+        const reqs = serverCtx.networkReqs.get(sessionId);
+        const reqId = params.requestId as string;
+        if (reqs?.has(reqId)) {
+          reqs.get(reqId)!.size = params.encodedDataLength as number;
+        }
+        break;
+      }
+
+      // ── Download tracking ──
+      case 'Page.downloadWillBegin': {
+        const dl = serverCtx.downloads.get(sessionId) || [];
+        dl.push({
+          guid: params.guid as string,
+          url: params.url as string,
+          suggestedFilename: (params.suggestedFilename as string) || 'unknown',
+          state: 'inProgress',
+          receivedBytes: 0,
+          totalBytes: 0,
+          ts: Date.now(),
+        });
+        if (dl.length > 100) dl.splice(0, dl.length - 100);
+        serverCtx.downloads.set(sessionId, dl);
+        break;
+      }
+
+      case 'Page.downloadProgress': {
+        const dl = serverCtx.downloads.get(sessionId);
+        if (dl) {
+          const entry = dl.find(d => d.guid === (params.guid as string));
+          if (entry) {
+            entry.receivedBytes = (params.receivedBytes as number) || 0;
+            entry.totalBytes = (params.totalBytes as number) || 0;
+            entry.state = (params.state as string) || entry.state;
+          }
+        }
+        break;
+      }
+
+      // ── Dialog handling ──
+      case 'Page.javascriptDialogOpening': {
+        const dialogs = serverCtx.pendingDialogs.get(sessionId) || [];
+        dialogs.push({
+          type: params.type as string,
+          message: params.message as string,
+          defaultPrompt: (params.defaultPromptText as string) || '',
+          url: (params.url as string) || '',
+          ts: Date.now(),
+        });
+        serverCtx.pendingDialogs.set(sessionId, dialogs);
+
+        // Auto-accept after 10s if not manually handled
+        setTimeout(async () => {
+          const current = serverCtx.pendingDialogs.get(sessionId);
+          if (current && current.length > 0) {
+            try {
+              await serverCtx.sendCommand('Page.handleJavaScriptDialog', { accept: true }, sessionId);
+              current.shift();
+            } catch { /* already handled */ }
+          }
+        }, 10000);
+        break;
+      }
+
+      // ── File chooser events ──
+      case 'Page.fileChooserOpened': {
+        const handlers = serverCtx.pendingFileChoosers.get(sessionId) || [];
+        for (const handler of handlers) {
+          handler(sessionId, event.method, params);
+        }
+
+        // Also set modal state so other tools know about the file chooser
+        const fileTabId = findTabBySession(serverCtx, sessionId);
+        if (fileTabId) {
+          serverCtx.modalStates.setModal(fileTabId, {
+            type: 'filechooser',
+            tabId: fileTabId,
+            details: {
+              multiple: params.mode === 'selectMultiple',
+            },
+            timestamp: Date.now(),
+          });
+        }
+        break;
+      }
+
+      // ── Fetch interception ──
+      case 'Fetch.requestPaused': {
+        // Response-stage pause — continue by default
+        if (params.responseStatusCode !== undefined) {
+          (async () => {
+            try {
+              await serverCtx.sendCommand('Fetch.continueResponse', {
+                requestId: params.requestId,
+              }, sessionId);
+            } catch { /* ok */ }
+          })();
+          break;
+        }
+
+        // Request-stage pause
+        const pending = serverCtx.pendingFetchRequests.get(sessionId) || new Map();
+        const reqId = params.requestId as string;
+        const request = params.request as { url: string; method: string; headers: Record<string, string> };
+        pending.set(reqId, {
+          requestId: reqId,
+          url: request.url,
+          method: request.method,
+          headers: request.headers,
+          resourceType: params.resourceType as string,
+          ts: Date.now(),
+        });
+        serverCtx.pendingFetchRequests.set(sessionId, pending);
+
+        // Auto-continue after 10s to prevent hangs
+        setTimeout(async () => {
+          if (pending.has(reqId)) {
+            try {
+              await serverCtx.sendCommand('Fetch.continueRequest', { requestId: reqId }, sessionId);
+            } catch { /* ok */ }
+            pending.delete(reqId);
+          }
+        }, 10000);
+        break;
+      }
+
+      // ── Debugger events ──
+      case 'Debugger.paused': {
+        const pauseTs = Date.now();
+        serverCtx.pausedTabs.set(sessionId, {
+          reason: params.reason as string,
+          callFrames: params.callFrames as any[],
+          hitBreakpoints: (params.hitBreakpoints as string[]) || [],
+          ts: pauseTs,
+        });
+
+        // Auto-resume after debugger timeout to prevent permanently bricked tabs
+        setTimeout(async () => {
+          const entry = serverCtx.pausedTabs.get(sessionId);
+          if (entry && entry.ts === pauseTs) {
+            try {
+              await serverCtx.sendCommand('Debugger.resume', {}, sessionId);
+            } catch { /* ok */ }
+            serverCtx.pausedTabs.delete(sessionId);
+          }
+        }, serverCtx.config.debuggerTimeout);
+        break;
+      }
+
+      case 'Debugger.resumed': {
+        serverCtx.pausedTabs.delete(sessionId);
+        break;
+      }
+
+      // ── OOP iframe auto-attach events ──
+      case 'Target.attachedToTarget': {
+        const childSessionId = params.sessionId as string;
+        const targetInfo = params.targetInfo as { type?: string; targetId?: string; url?: string } | undefined;
+        if (targetInfo?.type === 'iframe' && targetInfo.targetId) {
+          serverCtx.tabSessions.addChildSession(
+            sessionId,
+            targetInfo.targetId,
+            childSessionId,
+            targetInfo.url || '',
+          );
+          // Enable Runtime on the child session for JS execution
+          serverCtx.sendCommand('Runtime.enable', {}, childSessionId).catch(() => {});
+        }
+        break;
+      }
+
+      case 'Target.detachedFromTarget': {
+        const detachedSessionId = params.sessionId as string | undefined;
+        const detachedTargetId = params.targetId as string | undefined;
+        if (detachedSessionId || detachedTargetId) {
+          serverCtx.tabSessions.removeChildSession(
+            sessionId,
+            detachedTargetId || detachedSessionId || '',
+          );
+        }
+        break;
+      }
+    }
+  });
+}
+
 // ─── Server Context (DI container) ──────────────────────────────────
 
 const ctx: ServerContext = {
@@ -176,6 +464,13 @@ const ctx: ServerContext = {
   processSessionId: randomUUID(),
   snapshotCache,
   elementResolvers: new Map(),
+  consoleLogs: new Map(),
+  networkReqs: new Map(),
+  downloads: new Map(),
+  pendingDialogs: new Map(),
+  pendingFileChoosers: new Map(),
+  pausedTabs: new Map(),
+  pendingFetchRequests: new Map(),
 };
 
 // ─── Auto-connect with mutex (P0-2) ────────────────────────────────

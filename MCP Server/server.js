@@ -2307,17 +2307,29 @@ async function handleTabsNew(args) {
   const url = args.url || "about:blank";
   const background = args.activate === false || args.activate === undefined; // default: open in background
   const createParams = { url, background };
-  // Profile-aware tab creation: resolve profile name to browserContextId
+  // Profile-sticky sessions: use session's pinned profile if no explicit profile given
   if (args.profile) {
+    // Explicit profile requested — resolve it
     const resolved = await resolveProfileContext(args.profile);
     if (!resolved) return fail(`Profile "${args.profile}" not found or has no open tabs. Use browser.active to see available profiles and their contexts.`);
     createParams.browserContextId = resolved.browserContextId;
+  } else if (args._agentSession?.browserContextId) {
+    // AUTO: use session's pinned profile (prevents profile drift when user switches)
+    createParams.browserContextId = args._agentSession.browserContextId;
   }
   const { targetId } = await cdp("Target.createTarget", createParams);
   // Register ownership immediately so tabs.list shows it right away
   if (args._agentSession) {
     args._agentSession.tabIds.add(targetId);
     tabLocks.set(targetId, { sessionId: args._agentSessionId, origin: "created" });
+  }
+  // Pin profile to session if not already pinned
+  if (args._agentSession && !args._agentSession.browserContextId) {
+    try {
+      const tabs = await getTabs();
+      const newTab = tabs.find(t => t.targetId === targetId);
+      if (newTab?.browserContextId) args._agentSession.browserContextId = newTab.browserContextId;
+    } catch { /* best-effort */ }
   }
   return ok(`New tab: [${targetId}]\nURL: ${url}${background ? '' : ' (activated)'}`);
 }
@@ -5119,7 +5131,7 @@ async function handleTool(name, args) {
   // Get or create session
   let session = agentSessions.get(sessionId);
   if (!session) {
-    session = { lastActivity: now, tabIds: new Set(), cleanupStrategy: cleanupStrategy || "detach" };
+    session = { lastActivity: now, tabIds: new Set(), cleanupStrategy: cleanupStrategy || "detach", browserContextId: null };
     agentSessions.set(sessionId, session);
   }
   session.lastActivity = now;
@@ -5145,6 +5157,14 @@ async function handleTool(name, args) {
     // Only set lock if tab is unowned — never overwrite another session's lock
     if (!lockOwner) {
       tabLocks.set(args.tabId, { sessionId, origin: "claimed" });
+    }
+    // Auto-detect profile: pin session to Chrome profile of first claimed tab
+    if (!session.browserContextId) {
+      try {
+        const tabs = await getTabs();
+        const tab = tabs.find(t => t.targetId === args.tabId);
+        if (tab?.browserContextId) session.browserContextId = tab.browserContextId;
+      } catch { /* best-effort profile detection */ }
     }
   }
 

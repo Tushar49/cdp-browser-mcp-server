@@ -19,6 +19,8 @@ export interface AgentSession {
   lastActivity: number;
   cleanupStrategy: CleanupStrategy;
   tabIds: Set<string>;
+  /** Chrome profile (browserContextId) this session is pinned to. */
+  browserContextId?: string;
 }
 
 // ─── SessionManager ─────────────────────────────────────────────────

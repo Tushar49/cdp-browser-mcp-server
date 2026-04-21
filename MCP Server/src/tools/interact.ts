@@ -579,13 +579,151 @@ async function handleUpload(ctx: ServerContext, args: InteractArgs): Promise<Too
   const sess = await getTabSession(ctx, args.tabId);
   const retryTimeout = args.timeout || ctx.config.actionTimeout;
 
-  // No element specified — try to find a file input on the page
+  // No element specified — smart multi-target file upload
+  // Monitors main page AND popup windows for file chooser dialogs or file inputs.
   if (!args.uid && !args.selector) {
-    const found = await findAndSetFileInput(ctx, sess, args.files);
-    if (found) {
-      return ok(`Uploaded ${args.files.length} file(s) via file input: ${args.files.map(f => f.split(/[/\\]/).pop()).join(', ')}`);
+    const uploadTimeout = args.timeout || 30000;
+    const managedSessions = new Map<string, { targetId: string; isPopup: boolean }>();
+    const popupSessionIds: string[] = [];
+    let done = false;
+    let masterResolve!: (result: { sessionId: string; via: string }) => void;
+    let masterReject!: (err: Error) => void;
+
+    const masterPromise = new Promise<{ sessionId: string; via: string }>((resolve, reject) => {
+      masterResolve = resolve;
+      masterReject = reject;
+    });
+
+    const masterTimer = setTimeout(() => {
+      if (!done) {
+        done = true;
+        masterReject(new Error(
+          `No file input or file chooser dialog found within ${uploadTimeout / 1000}s.\n` +
+          'If a popup window opened (e.g. Google Drive Picker):\n' +
+          '• Use tabs.list to find the popup window\n' +
+          '• Snapshot the popup to find its file input or upload button\n' +
+          '• Use interact.upload with uid/selector targeting the file input in the popup',
+        ));
+      }
+    }, uploadTimeout);
+
+    function succeed(result: { sessionId: string; via: string }): void {
+      if (!done) {
+        done = true;
+        clearTimeout(masterTimer);
+        masterResolve(result);
+      }
     }
-    return Errors.fileChooserTimeout(args.timeout || ctx.config.navigationTimeout).toToolResult();
+
+    // Universal file chooser handler — fires for ANY monitored session
+    const fileChooserHandler = (sid: string, _method: string, _params: unknown): void => {
+      if (managedSessions.has(sid) && !done) {
+        succeed({ sessionId: sid, via: 'fileChooser' });
+      }
+    };
+
+    // Add file chooser monitoring to a CDP session
+    async function addMonitoring(sessId: string, targetId: string, isPopup: boolean): Promise<void> {
+      if (managedSessions.has(sessId) || done) return;
+      managedSessions.set(sessId, { targetId, isPopup });
+      const pending = ctx.pendingFileChoosers.get(sessId) || [];
+      pending.push(fileChooserHandler);
+      ctx.pendingFileChoosers.set(sessId, pending);
+      try {
+        await ctx.sendCommand('Page.setInterceptFileChooserDialog', { enabled: true }, sessId);
+      } catch { /* ok */ }
+    }
+
+    // 1. Monitor main page session for file chooser
+    await addMonitoring(sess, args.tabId, false);
+
+    // 2. Quick check: is there already a <input type="file"> on this page?
+    if (await findAndSetFileInput(ctx, sess, args.files)) {
+      succeed({ sessionId: sess, via: 'directInput' });
+    }
+
+    // 3. Record current tabs to detect new popups
+    const tabResult = await ctx.sendCommand('Target.getTargets', {
+      filter: [{ type: 'page' }],
+    }) as { targetInfos: Array<{ targetId: string }> };
+    const seenTargets = new Set((tabResult.targetInfos ?? []).map(t => t.targetId));
+
+    // 4. Poll for new popup windows + scan them for file inputs
+    const pollTimer = setInterval(async () => {
+      if (done) return;
+      try {
+        const targets = await ctx.sendCommand('Target.getTargets', {
+          filter: [{ type: 'page' }],
+        }) as { targetInfos: Array<{ targetId: string }> };
+
+        for (const tab of (targets.targetInfos ?? [])) {
+          if (seenTargets.has(tab.targetId) || done) continue;
+          seenTargets.add(tab.targetId);
+
+          // New popup/tab — attach lightweight CDP session and monitor
+          try {
+            const { sessionId: psid } = await ctx.sendCommand('Target.attachToTarget', {
+              targetId: tab.targetId, flatten: true,
+            }) as { sessionId: string };
+            popupSessionIds.push(psid);
+            await ctx.sendCommand('Runtime.enable', {}, psid).catch(() => {});
+            await ctx.sendCommand('Page.enable', {}, psid).catch(() => {});
+            await addMonitoring(psid, tab.targetId, true);
+          } catch { /* failed to attach — popup may have closed */ }
+        }
+
+        // Retry file input search on popup sessions (content may have loaded)
+        for (const psid of popupSessionIds) {
+          if (done) break;
+          if (await findAndSetFileInput(ctx, psid, args.files!)) {
+            succeed({ sessionId: psid, via: 'popupDirectInput' });
+          }
+        }
+      } catch { /* ignore polling errors */ }
+    }, 1000);
+
+    try {
+      const result = await masterPromise;
+
+      if (result.via === 'fileChooser') {
+        await ctx.sendCommand('Page.handleFileChooser', {
+          action: 'accept', files: args.files,
+        }, result.sessionId);
+        const where = managedSessions.get(result.sessionId)?.isPopup ? ' (from popup window)' : '';
+        return ok(`Uploaded ${args.files.length} file(s) via file chooser${where}: ${args.files.map(f => f.split(/[/\\]/).pop()).join(', ')}`);
+      }
+
+      if (result.via === 'popupDirectInput') {
+        await sleep(1000); // let the popup process the files
+        return ok(`Uploaded ${args.files.length} file(s) via popup file input: ${args.files.map(f => f.split(/[/\\]/).pop()).join(', ')}`);
+      }
+
+      // directInput on main page
+      return ok(`Uploaded ${args.files.length} file(s) via file input: ${args.files.map(f => f.split(/[/\\]/).pop()).join(', ')}`);
+    } catch (err) {
+      return fail((err as Error).message);
+    } finally {
+      clearInterval(pollTimer);
+      clearTimeout(masterTimer);
+
+      // Clean up file chooser handlers
+      for (const [sid] of managedSessions) {
+        const pending = ctx.pendingFileChoosers.get(sid) || [];
+        ctx.pendingFileChoosers.set(sid, pending.filter(h => h !== fileChooserHandler));
+        try {
+          await ctx.sendCommand('Page.setInterceptFileChooserDialog', { enabled: false }, sid);
+        } catch { /* ok */ }
+      }
+
+      // Detach from popup sessions
+      for (const psid of popupSessionIds) {
+        try { await ctx.sendCommand('Target.detachFromTarget', { sessionId: psid }); } catch { /* ok */ }
+        ctx.consoleLogs.delete(psid);
+        ctx.networkReqs.delete(psid);
+        ctx.pendingDialogs.delete(psid);
+        ctx.pendingFileChoosers.delete(psid);
+      }
+    }
   }
 
   // Element specified — use direct file input approach

@@ -7,6 +7,7 @@
 
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { platform, homedir } from 'os';
 import type { BrowserInstance, ProfileInfo } from '../types.js';
 
 // ─── Types ──────────────────────────────────────────────────────────
@@ -33,9 +34,41 @@ interface Candidate {
   path: string;
 }
 
-function getCandidates(extraPaths: string[] = []): Candidate[] {
-  const localAppData = process.env.LOCALAPPDATA || '';
+function getBrowserCandidates(): Candidate[] {
+  const os = platform();
+  const home = homedir();
 
+  if (os === 'win32') {
+    const local = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local');
+    return [
+      { name: 'Chrome', path: join(local, 'Google', 'Chrome', 'User Data') },
+      { name: 'Chrome Beta', path: join(local, 'Google', 'Chrome Beta', 'User Data') },
+      { name: 'Chrome Canary', path: join(local, 'Google', 'Chrome SxS', 'User Data') },
+      { name: 'Chromium', path: join(local, 'Chromium', 'User Data') },
+      { name: 'Edge', path: join(local, 'Microsoft', 'Edge', 'User Data') },
+      { name: 'Brave', path: join(local, 'BraveSoftware', 'Brave-Browser', 'User Data') },
+    ];
+  } else if (os === 'darwin') {
+    const appSupport = join(home, 'Library', 'Application Support');
+    return [
+      { name: 'Chrome', path: join(appSupport, 'Google', 'Chrome') },
+      { name: 'Chrome Canary', path: join(appSupport, 'Google', 'Chrome Canary') },
+      { name: 'Chromium', path: join(appSupport, 'Chromium') },
+      { name: 'Edge', path: join(appSupport, 'Microsoft Edge') },
+      { name: 'Brave', path: join(appSupport, 'BraveSoftware', 'Brave-Browser') },
+    ];
+  } else {
+    // Linux
+    return [
+      { name: 'Chrome', path: join(home, '.config', 'google-chrome') },
+      { name: 'Chromium', path: join(home, '.config', 'chromium') },
+      { name: 'Edge', path: join(home, '.config', 'microsoft-edge') },
+      { name: 'Brave', path: join(home, '.config', 'BraveSoftware', 'Brave-Browser') },
+    ];
+  }
+}
+
+function getCandidates(extraPaths: string[] = []): Candidate[] {
   const candidates: Candidate[] = [];
 
   // Extra paths (e.g. from CDP_USER_DATA or override) take priority
@@ -43,15 +76,8 @@ function getCandidates(extraPaths: string[] = []): Candidate[] {
     if (p) candidates.push({ name: 'Custom', path: p });
   }
 
-  // Platform paths – Windows only today; easy to extend for macOS/Linux
-  candidates.push(
-    { name: 'Chrome', path: join(localAppData, 'Google', 'Chrome', 'User Data') },
-    { name: 'Chrome Beta', path: join(localAppData, 'Google', 'Chrome Beta', 'User Data') },
-    { name: 'Chrome Canary', path: join(localAppData, 'Google', 'Chrome SxS', 'User Data') },
-    { name: 'Chromium', path: join(localAppData, 'Chromium', 'User Data') },
-    { name: 'Edge', path: join(localAppData, 'Microsoft', 'Edge', 'User Data') },
-    { name: 'Brave', path: join(localAppData, 'BraveSoftware', 'Brave-Browser', 'User Data') },
-  );
+  // Platform-specific browser paths
+  candidates.push(...getBrowserCandidates());
 
   return candidates;
 }

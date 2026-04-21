@@ -74,11 +74,24 @@ export async function preprocessToolCall(
     if (blocked) throw blocked;
   }
 
-  // 5. Inject internal fields for tools
+  // 5. Auto-detect profile: pin session to the Chrome profile of its first tab
+  if (tabId && !session.browserContextId) {
+    try {
+      const targets = (await ctx.sendCommand('Target.getTargets', {})) as {
+        targetInfos?: Array<{ targetId: string; browserContextId?: string }>;
+      };
+      const target = targets?.targetInfos?.find((t) => t.targetId === tabId);
+      if (target?.browserContextId) {
+        session.browserContextId = target.browserContextId;
+      }
+    } catch { /* non-critical — profile detection is best-effort */ }
+  }
+
+  // 6. Inject internal fields for tools
   args._agentSessionId = sessionId;
   args._agentSession = session;
 
-  // 6. Resolve CDP target session for tab-bound tools
+  // 7. Resolve CDP target session for tab-bound tools
   if (tabId) {
     try {
       const cdpSessionId = await ctx.tabSessions.getSession(ctx.cdpClient, tabId);
