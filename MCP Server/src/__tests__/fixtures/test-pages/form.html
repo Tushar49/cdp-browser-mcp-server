@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Test Form</title></head>
+<body>
+<h1>Test Form</h1>
+<form id="test-form">
+  <label for="name">Name:</label><input type="text" id="name" name="name"/>
+  <label for="email">Email:</label><input type="email" id="email" name="email" required/>
+  <label for="country">Country:</label>
+  <select id="country" name="country">
+    <option value="">Select...</option><option value="US">United States</option>
+    <option value="IN">India</option><option value="UK">United Kingdom</option>
+  </select>
+  <label><input type="checkbox" id="terms" name="terms"/> I agree</label>
+  <label><input type="radio" name="gender" value="M"/> Male</label>
+  <label><input type="radio" name="gender" value="F"/> Female</label>
+  <label for="date">Date:</label><input type="date" id="date" name="date"/>
+  <label for="bio">Bio:</label><textarea id="bio" name="bio"></textarea>
+  <label for="resume">Resume:</label><input type="file" id="resume" name="resume"/>
+  <button type="submit">Submit</button>
+</form>
+<pre id="result"></pre>
+<script>
+document.getElementById('test-form').addEventListener('submit',e=>{
+  e.preventDefault();
+  const d=Object.fromEntries(new FormData(e.target));
+  document.getElementById('result').textContent=JSON.stringify(d,null,2);
+});
+</script>
+</body></html>

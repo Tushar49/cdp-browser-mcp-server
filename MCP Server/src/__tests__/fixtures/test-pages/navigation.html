@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Nav Test</title></head>
+<body>
+<h1>Navigation Test</h1>
+<a href="#page1" id="link1">Page 1</a>
+<a href="#page2" id="link2">Page 2</a>
+<button id="btn" onclick="document.getElementById('out').textContent='clicked'">Click</button>
+<div id="out">initial</div>
+<script>
+window.addEventListener('hashchange',()=>{
+  document.getElementById('out').textContent='hash:'+location.hash;
+});
+</script>
+</body></html>
