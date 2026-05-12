@@ -78,6 +78,10 @@ interface PageArgs {
   paperWidth?: number;
   paperHeight?: number;
   margin?: { top?: number; bottom?: number; left?: number; right?: number };
+  // Snapshot filtering
+  interactive?: boolean;
+  search?: string;
+  maxLength?: number;
   // set_content
   html?: string;
   // add_style
@@ -356,8 +360,28 @@ async function handleSnapshot(ctx: ServerContext, args: PageArgs): Promise<ToolR
     ctx.snapshotCache.set(args.tabId, snapshot, allOptimized, currentUrl);
   }
 
+  // Post-processing: interactive-only filter
+  if (args.interactive) {
+    const interactiveNodes = TokenOptimizer.interactiveOnly(allOptimized);
+    const { serializeTree: serialize } = await import('../snapshot/accessibility.js');
+    snapshot = serialize(interactiveNodes);
+    nodeCount = countNodes(interactiveNodes);
+  }
+
+  // Post-processing: search filter
+  if (args.search) {
+    const searchNodes = TokenOptimizer.search(allOptimized, args.search);
+    const { serializeTree: serialize } = await import('../snapshot/accessibility.js');
+    snapshot = serialize(searchNodes);
+    nodeCount = countNodes(searchNodes);
+  }
+
   const header = `Page: ${title}\nURL: ${currentUrl}\nElements: ${nodeCount}\n\n`;
-  return ok(header + snapshot);
+  const fullOutput = header + snapshot;
+
+  // Post-processing: cap output length
+  const maxLen = args.maxLength ?? 20_000;
+  return ok(TokenOptimizer.capLength(fullOutput, maxLen));
 }
 
 async function handleScreenshot(ctx: ServerContext, args: PageArgs): Promise<ToolResult> {
@@ -782,7 +806,7 @@ const PAGE_DESCRIPTION = [
   '- back: Navigate back in browser history (requires: tabId; optional: waitUntil, timeout)',
   '- forward: Navigate forward in browser history (requires: tabId; optional: waitUntil, timeout)',
   '- reload: Reload the current page (requires: tabId; optional: ignoreCache, waitUntil, timeout)',
-  '- snapshot: Capture accessibility tree snapshot with element refs for interaction (requires: tabId; optional: diff — return only changes since last snapshot)',
+  '- snapshot: Capture accessibility tree snapshot with element refs for interaction (requires: tabId; optional: diff — return only changes since last snapshot, interactive — only interactive elements, search — filter by text, maxLength — cap output chars)',
   '- screenshot: Take a screenshot of the page or a specific element (requires: tabId; optional: fullPage, quality, uid, type[png|jpeg], path — absolute file path to save to disk)',
   "- content: Extract text or HTML content from the page or an element (requires: tabId; optional: uid, selector, format[text|html|full] — 'full' returns complete document HTML with doctype)",
   "- set_content: Set the page's HTML content directly (requires: tabId, html)",
@@ -830,6 +854,9 @@ const PAGE_INPUT_SCHEMA = {
     },
     uid: { type: 'number' as const, description: 'Element uid for screenshot/content.' },
     diff: { type: 'boolean' as const, description: 'If true, return only changes since last snapshot on this tab.' },
+    interactive: { type: 'boolean' as const, description: 'If true, return only interactive elements (buttons, inputs, links, dropdowns). Reduces snapshot size for small-context models.' },
+    search: { type: 'string' as const, description: 'Filter snapshot to elements whose name, value, or description matches this text (case-insensitive).' },
+    maxLength: { type: 'number' as const, description: 'Maximum characters in snapshot output (default: 20000). Use lower values (e.g. 8000) for small-context models.' },
     selector: { type: 'string' as const, description: 'CSS selector for content/wait.' },
     format: {
       type: 'string' as const,

@@ -3,7 +3,7 @@
 ## Project Overview
 This is a Chrome DevTools Protocol (CDP) based MCP server that connects to the user's real running browser. It's the only browser MCP that preserves auth, cookies, sessions, and extensions.
 
-**Version:** 5.0.0-alpha.2
+**Version:** 5.0.0-alpha.3
 **Architecture:** TypeScript, modular (38 files in src/)
 **Entry point:** `MCP Server/dist/index.js` (built from `MCP Server/src/index.ts`)
 **Legacy fallback:** `MCP Server/server.js` (v4.13.0, will be removed in v5.0.0 stable)
@@ -64,9 +64,21 @@ npm run lint         # Typecheck (tsc --noEmit)
 | `src/config.ts` | Environment variable config |
 | `src/tools/dispatch.ts` | Session routing, tab claiming, modal checks |
 | `src/tools/form.ts` | Smart form filling engine |
+| `src/tools/slim-mode.ts` | Slim mode — 6 Playwright-compatible tools for 32K models |
 | `src/connection/cdp-client.ts` | CDP WebSocket client |
 | `src/connection/health-monitor.ts` | Auto-reconnect |
 | `src/utils/error-handler.ts` | 17 actionable error types |
+
+### Slim Mode (`CDP_SLIM_MODE=true`)
+- Exposes 6 tools: `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_fill_form`, `browser_tabs`
+- Schema size: ~1.5KB vs ~8KB for full tool set
+- Tool names are Playwright-compatible for zero-learning-curve adoption
+- `getSlimTools()` returns tool definitions; `mapSlimToFull()` maps slim→full tool calls
+
+### Form Filling — Country Code & Location
+- `type: 'country-code'` normalizes `+91` → "91", `IN` → "India", then uses combobox handler
+- `type: 'location'` types slowly (100ms/char), waits 2s for API suggestions, selects first match
+- Both use `fillCountryCode()` and `fillLocation()` in `src/tools/form.ts`
 
 ## Testing
 - Unit tests: `src/__tests__/unit/` — test pure logic, no CDP

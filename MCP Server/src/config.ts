@@ -38,5 +38,7 @@ export function loadConfig(): ServerConfig {
     maxTempAgeMs: 30 * 60 * 1000, // 30 minutes
 
     autoConnectProfile: process.env.CDP_PROFILE || '',
+
+    slimMode: process.env.CDP_SLIM_MODE === 'true',
   };
 }

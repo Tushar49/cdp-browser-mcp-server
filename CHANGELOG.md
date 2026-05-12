@@ -2,6 +2,29 @@
 
 All notable changes to CDP Browser MCP Server will be documented in this file.
 
+## [5.0.0-alpha.3] - 2026-05-12
+
+### Added
+- **Slim Mode** (`CDP_SLIM_MODE=true`) — 6 Playwright-compatible tools for small-context models (32K). Schema drops from ~8KB to ~1.5KB.
+- **Interactive-only snapshots** — `page.snapshot({ interactive: true })` returns only buttons, inputs, links
+- **Search in snapshots** — `page.snapshot({ search: "Login" })` filters to matching elements
+- **Snapshot length cap** — `page.snapshot({ maxLength: 8000 })` with smart line-boundary truncation
+- **Country code handler** — form.fill understands +91, India, IN for phone country code fields
+- **Location autocomplete** — form.fill handles debounced address/location autocomplete inputs
+- **Network settle after clicks** — Playwright-style waitForNetworkSettle after interactions
+
+### Fixed
+- Auto-connect: 3-strategy connection (cached URL → port probe → file discovery)
+- Connection errors now show EXACT fix steps (chrome://flags instruction)
+- Combobox timing: 80ms char delay, 1s debounce, 5s poll (was 50ms/3s)
+- Short-prefix retry for comboboxes when full value yields no results
+- Tool descriptions trimmed 40% for lower token cost
+
+### Changed
+- Version: 5.0.0-alpha.3
+
+## [Unreleased]
+
 ## [5.0.0-alpha.2] - 2026-04-22
 
 ### Added
