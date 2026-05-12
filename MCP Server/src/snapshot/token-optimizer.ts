@@ -40,6 +40,11 @@ const INTERACTIVE_ROLES = new Set([
   'searchbox',
   'tree',
   'treeitem',
+  'textarea',
+  'menu',
+  'menubar',
+  'gridcell',
+  'row',
 ]);
 
 export class TokenOptimizer {
@@ -225,6 +230,76 @@ export class TokenOptimizer {
     const result: AXNode[] = [];
     for (const node of nodes) {
       result.push(...fn(node));
+    }
+    return result;
+  }
+
+  // ─── Slim-mode optimizations ────────────────────────────────────────
+
+  /**
+   * Interactive-only mode — return only elements users can interact with,
+   * plus headings for context and named images.
+   * Ideal for small-context models that only need actionable elements.
+   */
+  static interactiveOnly(nodes: AXNode[]): AXNode[] {
+    return TokenOptimizer.filterTree(nodes, node =>
+      INTERACTIVE_ROLES.has(node.role) ||
+      node.role === 'heading' ||
+      (node.role === 'img' && !!node.name),
+    );
+  }
+
+  /**
+   * Search mode — return only elements whose name, value, or description
+   * matches the query string (case-insensitive).
+   */
+  static search(nodes: AXNode[], query: string): AXNode[] {
+    const q = query.toLowerCase();
+    return TokenOptimizer.filterTree(nodes, node =>
+      (node.name?.toLowerCase().includes(q) ?? false) ||
+      (node.value?.toLowerCase().includes(q) ?? false) ||
+      (node.description?.toLowerCase().includes(q) ?? false),
+    );
+  }
+
+  /**
+   * Cap serialized output to a maximum character length with smart truncation.
+   * Truncates at a line boundary to avoid breaking element references.
+   */
+  static capLength(serialized: string, maxChars: number): string {
+    if (serialized.length <= maxChars) return serialized;
+    const truncPoint = serialized.lastIndexOf('\n', maxChars - 200);
+    const cutAt = truncPoint > 0 ? truncPoint : maxChars - 200;
+    return (
+      serialized.substring(0, cutAt) +
+      `\n\n... (truncated ${serialized.length - cutAt} chars. Use search parameter to find specific elements)`
+    );
+  }
+
+  /**
+   * Filter tree, keeping nodes that match predicate and their ancestors.
+   * Children of non-matching nodes are promoted to parent scope.
+   */
+  private static filterTree(
+    nodes: AXNode[],
+    predicate: (node: AXNode) => boolean,
+  ): AXNode[] {
+    const result: AXNode[] = [];
+    for (const node of nodes) {
+      const filteredChildren = node.children
+        ? TokenOptimizer.filterTree(node.children, predicate)
+        : [];
+
+      if (predicate(node)) {
+        // Keep this node with its filtered children
+        result.push({
+          ...node,
+          children: filteredChildren.length > 0 ? filteredChildren : undefined,
+        });
+      } else if (filteredChildren.length > 0) {
+        // Node doesn't match but has matching descendants — promote them
+        result.push(...filteredChildren);
+      }
     }
     return result;
   }

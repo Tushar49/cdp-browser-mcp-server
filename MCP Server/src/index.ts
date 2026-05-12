@@ -39,7 +39,7 @@ import { SnapshotCache } from './snapshot/cache.js';
 import { ToolRegistry } from './tools/registry.js';
 import { preprocessToolCall } from './tools/dispatch.js';
 import { defineTool, success } from './tools/base-tool.js';
-import { wrapError } from './utils/error-handler.js';
+import { ActionableError, wrapError } from './utils/error-handler.js';
 import type { ServerContext, FileChooserHandler } from './types.js';
 
 // Tool modules
@@ -55,6 +55,7 @@ import { registerCleanupTools } from './tools/cleanup.js';
 import { registerBrowserTools } from './tools/browser.js';
 import { registerDebugTools } from './tools/debug.js';
 import { registerFormTools } from './tools/form.js';
+import { getSlimTools, mapSlimToFull } from './tools/slim-mode.js';
 
 // ─── Bootstrap ──────────────────────────────────────────────────────
 
@@ -524,18 +525,43 @@ registry.register(
 
 // ─── Register All Tool Modules ──────────────────────────────────────
 
-registerTabsTools(registry, ctx);
-registerPageTools(registry, ctx);
-registerInteractTools(registry, ctx);
-registerExecuteTools(registry, ctx);
-registerObserveTools(registry, ctx);
-registerEmulateTools(registry, ctx);
-registerStorageTools(registry, ctx);
-registerInterceptTools(registry, ctx);
-registerCleanupTools(registry, ctx);
-registerBrowserTools(registry, ctx);
-registerDebugTools(registry, ctx);
-registerFormTools(registry, ctx);
+if (config.slimMode) {
+  // Slim mode: 6 essential tools with Playwright-compatible names
+  const slimTools = getSlimTools();
+  for (const tool of slimTools) {
+    registry.register(
+      defineTool({
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+        handler: async (serverCtx, args) => {
+          const mapped = mapSlimToFull(tool.name, args);
+          return registry.dispatch(mapped.tool, mapped.args, serverCtx);
+        },
+      }),
+    );
+  }
+
+  // Still register the full tools so slim→full dispatch works
+  registerTabsTools(registry, ctx);
+  registerPageTools(registry, ctx);
+  registerInteractTools(registry, ctx);
+  registerFormTools(registry, ctx);
+} else {
+  // Full mode: all 15 tools
+  registerTabsTools(registry, ctx);
+  registerPageTools(registry, ctx);
+  registerInteractTools(registry, ctx);
+  registerExecuteTools(registry, ctx);
+  registerObserveTools(registry, ctx);
+  registerEmulateTools(registry, ctx);
+  registerStorageTools(registry, ctx);
+  registerInterceptTools(registry, ctx);
+  registerCleanupTools(registry, ctx);
+  registerBrowserTools(registry, ctx);
+  registerDebugTools(registry, ctx);
+  registerFormTools(registry, ctx);
+}
 
 // ─── MCP Server─────────────────────────────────────────────────────
 
@@ -545,7 +571,9 @@ const server = new Server(
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: registry.list(),
+  tools: config.slimMode
+    ? registry.list().filter(t => t.name.startsWith('browser_') || t.name === 'ping' || t.name === 'status')
+    : registry.list(),
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -559,7 +587,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
       await ensureConnected();
     } catch (err) {
-      return wrapError(err).toToolResult();
+      const ae = err instanceof ActionableError ? err : wrapError(err);
+      return {
+        content: [{
+          type: 'text',
+          text: `## Browser Not Connected\n\n${ae.message}\n\n### How to fix\n${ae.fix}\n\n` +
+                `After fixing, just retry your command — no reconnect step needed.`,
+        }],
+        isError: true,
+      };
     }
   }
 

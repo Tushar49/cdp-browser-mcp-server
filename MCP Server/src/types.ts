@@ -55,6 +55,9 @@ export interface ServerConfig {
 
   /** If set, auto-connect to this Chrome instance/profile on startup */
   autoConnectProfile: string;
+
+  /** If true, expose 6 slim tools instead of 15 full tools (for small-context models) */
+  slimMode: boolean;
 }
 
 // ─── MCP Tool Result ────────────────────────────────────────────────
