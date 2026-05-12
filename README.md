@@ -155,6 +155,20 @@ That's it. Two dependencies: `ws` (WebSocket client) and `@modelcontextprotocol/
 
 > **Note:** The server auto-connects to your running browser on first tool call — no manual `browser.connect()` needed.
 
+### Step 2b: Install commit hooks (optional, recommended)
+
+From the repo root (not `MCP Server/`):
+
+```bash
+# macOS/Linux/Git Bash on Windows
+bash .githooks/install.sh
+
+# PowerShell on Windows
+pwsh -File .githooks/install.ps1
+```
+
+This installs a friendly pre-commit reminder that nudges you to update `CHANGELOG.md` when you change code. It's a warning, not a block - commits never fail. Skip a single commit with `git commit --no-verify`. Disable entirely with `git config --unset core.hooksPath`.
+
 ### Step 3: Configure Your MCP Client
 
 <details>
