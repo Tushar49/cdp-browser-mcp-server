@@ -29,9 +29,38 @@ fabricated token storage was introduced.
 
 See `.research/ConnectionTokenInvestigation.md` for full investigation.
 
+### A.1 — DONE 2026-05-13
+Created scripts/start-chrome.{ps1,sh}. Both auto-detect Chrome path, no-op if port already in use, support --isolated for fresh profile, document the persistent infobar limitation inline.
+
+Usage:
+  pwsh -File scripts/start-chrome.ps1
+  pwsh -File scripts/start-chrome.ps1 -Isolated
+  bash scripts/start-chrome.sh
+  ISOLATED=1 bash scripts/start-chrome.sh
+
+This eliminates the "different port each session" problem - agents always know port 9222 is where Chrome lives.
+
+### A.2 — DONE 2026-05-13
+docs/CHROME_AUTOMATION_INFOBAR.md created. Explains the infobar is Chrome-enforced and cannot be hidden in stable builds. Documents what users have tried (none work) and how to work around it (maximize, dedicated profile, accept it).
+
+### A.3 — STUBBED 2026-05-13
+extension/popup.js + background.js now have chrome.storage.local approval persistence wired in. When the extension graduates from v0.1.0 stub, the persistence is already in place. STORAGE_KEY = "cdp_mcp_approvals", schema: { originOrId: { approved: bool, timestamp: number } }.
+
+Remaining work for full activation:
+- Wire MCP bridge handshake to check_approval before allowing first request
+- UI for "Approve this client" prompt on unknown originOrId
+- Optional: expiry policy (auto-revoke after 30 days)
+
 ---
 
-### E. Agent test suite expansion (tough websites)
+### E — SCAFFOLDED 2026-05-13
+Scenario files for 6 sites + types + runner stub + shape-validation test (20 passing).
+See `MCP Server/src/__tests__/agent-suite/README.md` for activation plan.
+Live runs deferred: need CI MCP servers, credentials, CAPTCHA solver. The scaffold
+locks the `Scenario` shape and documents each site's known failure modes so a
+future activation session can plug in the executor without re-deriving requirements.
+
+### E (original). Agent test suite expansion (tough websites)
 **Goal:** Test each tool on hard websites in parallel; compare against Playwright MCP.
 
 **Sites to cover:**
@@ -95,7 +124,7 @@ See `.research/ConnectionTokenInvestigation.md` for full investigation.
 **Goal:** Whenever we touch ANY file, also update the matching CHANGELOG/instructions.
 
 **Already partially done** — each task in this session updates CHANGELOG. The wider goal:
-- Add a pre-commit hook that warns if a code change has no CHANGELOG entry
+- [x] Add a pre-commit hook that warns if a code change has no CHANGELOG entry — **INSTALLED 2026-05-13** in `.githooks/pre-commit`. Non-blocking. Same logic copied to JobApplications repo. Installer: `bash .githooks/install.sh` or `pwsh -File .githooks/install.ps1`. Disable: `git config --unset core.hooksPath`.
 - Add a doc-maintainer skill invocation to ralph workflows
 - Auto-bump version in package.json on every dev push
 

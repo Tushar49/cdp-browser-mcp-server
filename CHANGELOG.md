@@ -4,6 +4,9 @@ All notable changes to CDP Browser MCP Server will be documented in this file.
 
 ## [5.0.0-alpha.4] - 2026-05-13
 
+### Added
+- `src/__tests__/agent-suite/`: scenario definitions for LinkedIn Easy Apply, Adobe Phenom, Hirist 403, Greenhouse w/ reCAPTCHA, Workday iframes, Google Forms phone country code. Runner stub awaiting activation (`runScenario`/`compareScenario` throw with pointer to BACKLOG E). Shape validation tests pass (20/20 in `unit/agent-suite-scenarios.test.ts`).
+
 ### Changed (slim mode)
 - Tool descriptions further trimmed in slim mode (-43%): each `browser_*` tool now has a one-line description, per-property schema descriptions stripped where the name is self-documenting. Total slim `ListTools` JSON: 2,226 → 1,416 chars (-36%).
 - Response messages shortened in slim mode: `Clicked <div> "Submit Application" at (320, 482)` → `Clicked` for click / hover / type / drag / scroll / focus / check / tap / press / select / upload. Saves ~30-60 chars per call (~350 chars per typical 10-action session).
@@ -13,7 +16,9 @@ All notable changes to CDP Browser MCP Server will be documented in this file.
 - Shorter cap-truncation footer in slim mode (-40 chars when output is truncated).
 
 ### Added
-- Regression tests for slim mode output budgets (`src/__tests__/unit/slim-output-budget.test.ts`, 11 tests). Enforces: schema total < 1500 chars, synthetic complex-form snapshot < 6000 chars, slim click result < 80 chars.
+- docs/CHROME_AUTOMATION_INFOBAR.md — explains the Chrome "is being controlled" infobar and why it cannot be hidden
+- extension/: chrome.storage.local approval persistence (popup.js, background.js, manifest.json permission) — ready for extension graduation from stub
+- Regression tests for slim mode output budgets(`src/__tests__/unit/slim-output-budget.test.ts`, 11 tests). Enforces: schema total < 1500 chars, synthetic complex-form snapshot < 6000 chars, slim click result < 80 chars.
 - `isSlimMode()`, `slimify(verbose, slim)`, `defaultSnapshotMaxLength()` helpers exported from `src/tools/slim-mode.ts`.
 
 ### Added (Playwright parity)
@@ -46,6 +51,10 @@ All notable changes to CDP Browser MCP Server will be documented in this file.
 - Version: 5.0.0-alpha.3
 
 ## [Unreleased]
+
+### Added
+- `.githooks/` - pre-commit warning when code changes without CHANGELOG update. Non-blocking. Install with `bash .githooks/install.sh` or `pwsh -File .githooks/install.ps1`. Skip with `git commit --no-verify`. See `.githooks/README.md`.
+- scripts/start-chrome.{ps1,sh} - consistent Chrome launcher for CDP debugging port. No-ops if already running. Supports --isolated for fresh automation profile.
 
 ## [5.0.0-alpha.2] - 2026-04-22
 
