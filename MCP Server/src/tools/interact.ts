@@ -13,6 +13,51 @@ import { ok, fail, randomDelay, generateBezierPath } from '../utils/helpers.js';
 import { Errors, wrapError } from '../utils/error-handler.js';
 import { sleep } from '../utils/wait.js';
 
+// ─── Network Settle Helper ──────────────────────────────────────────
+
+/**
+ * Wait for network to settle after an action (no new requests for 500ms).
+ * Mirrors Playwright's waitForCompletion pattern.
+ */
+async function waitForNetworkSettle(
+  ctx: ServerContext,
+  sess: string,
+  timeoutMs: number = 3000,
+): Promise<string[]> {
+  const events: string[] = [];
+  const networkReqs = ctx.networkReqs.get(sess);
+  if (!networkReqs) return events;
+
+  const pendingAtStart = new Set<string>();
+  for (const [id, req] of networkReqs) {
+    if (!req.status) pendingAtStart.add(id);
+  }
+
+  if (pendingAtStart.size === 0) return events;
+
+  const start = Date.now();
+  let lastActivity = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    await sleep(100);
+    let stillPending = 0;
+    for (const id of pendingAtStart) {
+      const req = networkReqs.get(id);
+      if (req && !req.status) {
+        stillPending++;
+      } else if (req?.status) {
+        events.push(`${req.method} ${req.url.substring(0, 60)} → ${req.status}`);
+        pendingAtStart.delete(id);
+        lastActivity = Date.now();
+      }
+    }
+    if (stillPending === 0) break;
+    if (Date.now() - lastActivity > 500) break; // settled
+  }
+
+  return events;
+}
+
 // ─── Arg Interfaces ─────────────────────────────────────────────────
 
 interface InteractArgs {
@@ -161,11 +206,16 @@ async function handleClick(ctx: ServerContext, args: InteractArgs): Promise<Tool
       type: 'mouseReleased', x: el.x, y: el.y, button, clickCount: clicks, modifiers: mods,
     }, sess);
 
-    return ok(`Clicked <${el.tag}> "${el.label}" at (${Math.round(el.x)}, ${Math.round(el.y)})`);
+    // Wait briefly for any triggered network requests to settle
+    const netEvents = await waitForNetworkSettle(ctx, sess, 2000);
+    const netSuffix = netEvents.length > 0 ? `\nNetwork: ${netEvents.length} request(s) completed` : '';
+    return ok(`Clicked <${el.tag}> "${el.label}" at (${Math.round(el.x)}, ${Math.round(el.y)})${netSuffix}`);
   } catch {
     // CDP click failed (element not interactable) — fallback to JS click
     await jsClickElement(ctx, resolvedSession, node.backendNodeId);
-    return ok(`Clicked (JS fallback) <${el.tag}> "${el.label}" at (${Math.round(el.x)}, ${Math.round(el.y)})`);
+    const netEvents2 = await waitForNetworkSettle(ctx, sess, 2000);
+    const netSuffix2 = netEvents2.length > 0 ? `\nNetwork: ${netEvents2.length} request(s) completed` : '';
+    return ok(`Clicked (JS fallback) <${el.tag}> "${el.label}" at (${Math.round(el.x)}, ${Math.round(el.y)})${netSuffix2}`);
   }
 }
 
@@ -1130,37 +1180,24 @@ const INTERACT_ACTIONS: Record<string, (ctx: ServerContext, args: InteractArgs) 
 // ─── Tool Registration ──────────────────────────────────────────────
 
 const INTERACT_DESCRIPTION = [
-  'Element interaction. Always take a snapshot first to get uid refs.',
+  'Element interaction — click, type, fill, select, press, drag, scroll, upload, focus, check, tap.',
+  'Always take a snapshot first to get uid refs.',
   '',
-  "Click falls back to JavaScript click only when CDP mouse events fail (element not interactable). Set jsClick: true to force JS click for sites like LinkedIn or React portals.",
+  'Actions:',
+  '- click: Click element (tabId, uid/selector; optional: button, clickCount, jsClick, modifiers, humanMode)',
+  '- hover: Hover element (tabId, uid/selector)',
+  '- type: Type text (tabId, text, uid/selector; optional: clear, submit, delay, charDelay, wordDelay, typoRate)',
+  '- fill: Fill multiple fields [{uid, value, type}] (tabId, fields)',
+  '- select: Select dropdown option (tabId, value, uid/selector)',
+  '- press: Press key (tabId, key; optional: modifiers)',
+  '- drag: Drag between elements (tabId, sourceUid/sourceSelector, targetUid/targetSelector)',
+  '- scroll: Scroll page/element (tabId; optional: direction, amount, x, y, uid/selector)',
+  '- upload: Upload files (tabId, files; optional: uid/selector — without uid monitors for file chooser dialogs)',
+  '- focus: Focus element (tabId, uid/selector)',
+  '- check: Set checkbox state (tabId, checked, uid/selector)',
+  '- tap: Touch tap element (tabId, uid/selector)',
   '',
-  "For form filling, prefer the 'fill' action which handles multiple fields in one call — pass an array of {uid, value, type} objects instead of separate type/wait/snapshot/click sequences.",
-  '',
-  'Operations:',
-  '- click: Click an element. Falls back to JS click on CDP failure (requires: tabId, uid or selector; optional: button[left|right|middle], clickCount — use 2 for double-click, modifiers[Control|Shift|Alt|Meta], jsClick, timeout)',
-  '- hover: Hover over an element to trigger tooltips or menus (requires: tabId, uid or selector; optional: modifiers[Control|Shift|Alt|Meta], timeout)',
-  '- type: Type text into a focused input field (requires: tabId, text, uid or selector; optional: clear[default:true] — clears field first, submit — press Enter after typing, delay — fixed ms between keystrokes, charDelay — base ms between chars with randomized range [base, base*3] default 200ms, wordDelay — base ms between words with randomized range [base, base*3] default 800ms, timeout)',
-  '- fill: Fill multiple form fields in one call (requires: tabId, fields — array of {uid or selector, value, type[text|checkbox|radio|select]}; optional: timeout)',
-  '- select: Select an option from a <select> dropdown by value or visible text (requires: tabId, value, uid or selector; optional: timeout)',
-  '- press: Press a keyboard key with optional modifiers (requires: tabId, key; optional: modifiers[Control|Shift|Alt|Meta])',
-  '- drag: Drag an element to another element (requires: tabId, sourceUid or sourceSelector, targetUid or targetSelector; optional: timeout)',
-  '- scroll: Scroll the page or a specific element (requires: tabId; optional: direction[up|down|left|right], amount[default:400px], x, y for absolute scroll, uid or selector for scrolling within an element, timeout)',
-  '- upload: Upload files to a file input or intercept a file chooser dialog. With uid/selector: sets files directly on a <input type=file>. Without uid/selector: monitors for file chooser dialogs on BOTH the current page AND any popup windows that open (handles Google Drive Picker, Dropbox chooser, etc.) — also auto-detects hidden <input type=file> elements (requires: tabId, files — array of absolute file paths; optional: uid or selector, timeout — default 30s for popup detection)',
-  '- focus: Focus an element and scroll it into view (requires: tabId, uid or selector; optional: timeout)',
-  '- check: Set a checkbox to checked or unchecked (requires: tabId, checked[true|false], uid or selector; optional: timeout)',
-  '- tap: Tap an element using touch events (requires: tabId, uid or selector; optional: timeout)',
-  '',
-  "Element Resolution: Provide either 'uid' (from a snapshot) or 'selector' (CSS selector). UIDs are preferred — they come from the accessibility snapshot and map to visible, interactive elements.",
-  '',
-  'Frame interaction: Use \'uid\' from snapshots to interact with elements inside iframes — CSS selectors only find top-level elements. Snapshot includes iframe content with [frame N] prefixes.',
-  '',
-  'Auto-retry: All actions automatically retry element resolution and actionability checks until the element is found+actionable or timeout expires (default: CDP_ACTION_TIMEOUT). Use \'timeout\' to customize.',
-  '',
-  'Human-like mode: Set humanMode: true for realistic mouse paths (bezier curves, overshoot, jitter). Works with click, hover, drag. Combine with charDelay/wordDelay + typoRate for human typing.',
-  '',
-  'Auto-snapshot (experimental): Set autoSnapshot: true to capture snapshots before/after the action. Not yet implemented — reserved for future use.',
-  '',
-  'Keys for press: Enter, Tab, Escape, Backspace, Delete, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Home, End, PageUp, PageDown, Space, F1-F12, Insert',
+  'Use uid (from snapshot) or CSS selector. UIDs preferred. Set humanMode:true for realistic mouse paths.',
 ].join('\n');
 
 const INTERACT_INPUT_SCHEMA = {
