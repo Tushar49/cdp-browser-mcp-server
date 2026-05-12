@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-5.0.0--alpha.2-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-5.0.0--alpha.3-blue" alt="Version">
   <img src="https://img.shields.io/badge/tools-14-green" alt="Tools">
   <img src="https://img.shields.io/badge/sub--actions-90+-green" alt="Actions">
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen" alt="Node">
@@ -270,7 +270,7 @@ The server communicates over stdio using the MCP protocol. Any MCP-compatible cl
 | `back` | Navigate back in history | `tabId` | `waitUntil`, `timeout` |
 | `forward` | Navigate forward in history | `tabId` | `waitUntil`, `timeout` |
 | `reload` | Reload page | `tabId` | `ignoreCache`, `waitUntil`, `timeout` |
-| `snapshot` | Accessibility tree with element refs | `tabId` | — |
+| `snapshot` | Accessibility tree with element refs | `tabId` | `interactive`, `search`, `maxLength` |
 | `screenshot` | Capture page or element as image (fullPage scrolls SPA containers to trigger lazy loading) | `tabId` | `fullPage`, `quality`, `uid`, `type`, `path` |
 | `content` | Extract text, HTML, or full document source | `tabId` | `uid`, `selector`, `format`(`text`\|`html`\|`full`) |
 | `set_content` | Set page HTML content directly | `tabId`, `html` | — |
@@ -310,12 +310,14 @@ Fill entire forms in a single call. Auto-detects field types and handles framewo
 | `fields` | Array of `{ uid, value, type? }` — type auto-detected if omitted | Yes |
 | `timeout` | Per-field timeout in ms (default: 10000) | No |
 
-**Supported field types:** `text`, `combobox`, `checkbox`, `radio`, `select`, `date`
+**Supported field types:** `text`, `combobox`, `checkbox`, `radio`, `select`, `date`, `country-code`, `location`
 
 - **Combobox/React Select**: Types into the input, waits for dropdown, finds best match, selects it. Works with Greenhouse, Lever, MUI Autocomplete
 - **Checkbox/Radio**: Sets checked state based on value (`"true"` / `"false"`)
 - **Native `<select>`**: Selects option by visible text or value
 - **Date inputs**: Sets value via native input setter with proper event dispatch
+- **Country code**: Normalizes `+91`, `India`, or `IN` → searches country dropdown
+- **Location**: Slow-types for API-driven autocomplete, waits for suggestions
 
 ### `execute` — JavaScript Execution
 
@@ -556,6 +558,40 @@ WebSocket ping/pong every 30 seconds. If 2 consecutive pings fail, the connectio
 | `CDP_CLEANUP_STRATEGY` | `detach` | Default tab cleanup strategy: `close`, `detach`, or `none` |
 | `CDP_TEMP_DIR` | *(cwd)/.temp* | Directory for temp files (screenshots, PDFs). Resolved at runtime from cwd if empty |
 | `CDP_PROFILE` | — | Auto-connect to Chrome instance by name or User Data path on first tool call (lazy, not at startup) |
+| `CDP_SLIM_MODE` | `false` | Enable slim mode: 6 Playwright-compatible tools instead of 14. Ideal for 32K-context models |
+
+---
+
+## Slim Mode
+
+For models with small context windows (32K or less), enable **Slim Mode** to reduce the tool surface from 14 tools (~8KB of schemas) to just 6 essential tools (~1.5KB):
+
+```json
+{
+  "mcpServers": {
+    "cdp-browser": {
+      "command": "node",
+      "args": ["/path/to/MCP Server/dist/index.js"],
+      "env": {
+        "CDP_SLIM_MODE": "true"
+      }
+    }
+  }
+}
+```
+
+### Slim Mode Tools
+
+| Slim Tool | Maps To | Description |
+|-----------|---------|-------------|
+| `browser_navigate` | `page.goto` | Navigate to URL |
+| `browser_snapshot` | `page.snapshot` | Get accessibility tree (supports `interactive`, `search`, `maxLength`) |
+| `browser_click` | `interact.click` | Click element by ref |
+| `browser_type` | `interact.type` | Type text into element |
+| `browser_fill_form` | `form.fill` | Fill multiple form fields |
+| `browser_tabs` | `tabs.list/new/close` | Tab management |
+
+Tool names are **Playwright-compatible** — agents that already know Playwright MCP can use them without learning new APIs. All slim tool calls are transparently mapped to the full tool handlers.
 
 ---
 

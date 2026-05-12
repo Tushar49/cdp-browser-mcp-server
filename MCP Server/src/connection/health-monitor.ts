@@ -15,6 +15,7 @@ import {
   resolveWsUrlAsync,
   findBestInstance,
 } from './browser-discovery.js';
+import { ActionableError } from '../utils/error-handler.js';
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -60,6 +61,8 @@ export class HealthMonitor {
   private timer: ReturnType<typeof setInterval> | null = null;
   private reconnectAttempts = 0;
   private connectPromise: Promise<void> | null = null;
+  /** Last known good WebSocket URL for instant reconnect. */
+  private lastGoodWsUrl: string | null = null;
 
   /** When true, onDisconnect() skips auto-reconnect (P1-4: browser.connect race). */
   suppressAutoReconnect = false;
@@ -150,6 +153,7 @@ export class HealthMonitor {
           this.cdpPort,
         );
         await this.client.connect(wsUrl);
+        this.lastGoodWsUrl = wsUrl;
         this.onConnected();
         return true;
       } catch {
@@ -182,25 +186,59 @@ export class HealthMonitor {
 
   /** Internal auto-connect implementation. */
   private async _doAutoConnect(): Promise<void> {
+    // Strategy 1: Try last known good connection
+    if (this.lastGoodWsUrl) {
+      try {
+        await this.client.connect(this.lastGoodWsUrl);
+        this.onConnected();
+        return;
+      } catch { /* try next strategy */ }
+    }
 
-    // If a preferred profile is configured, try to match it
-    if (this.preferredProfile) {
-      const instances = discoverBrowserInstances({ skipProfiles: true });
-      const match = findBestInstance(instances, this.preferredProfile);
-      if (match) {
-        this.overrideUserDataDir = match.userDataDir;
+    // Strategy 2: Probe common debugging ports via HTTP /json/version
+    const COMMON_PORTS = [this.cdpPort, 9222, 9229, 9333, 9515];
+    const uniquePorts = [...new Set(COMMON_PORTS)];
+    for (const port of uniquePorts) {
+      try {
+        const resp = await fetch(`http://${this.cdpHost}:${port}/json/version`, {
+          signal: AbortSignal.timeout(2000),
+        });
+        const data = (await resp.json()) as { webSocketDebuggerUrl?: string };
+        if (data.webSocketDebuggerUrl) {
+          await this.client.connect(data.webSocketDebuggerUrl);
+          this.lastGoodWsUrl = data.webSocketDebuggerUrl;
+          this.onConnected();
+          return;
+        }
+      } catch { continue; }
+    }
+
+    // Strategy 3: File-based discovery (DevToolsActivePort)
+    const instances = discoverBrowserInstances();
+    if (instances.length > 0) {
+      const best = this.preferredProfile
+        ? findBestInstance(instances, this.preferredProfile)
+        : instances[0];
+      if (best) {
+        try {
+          await this.client.connect(best.wsUrl);
+          this.lastGoodWsUrl = best.wsUrl;
+          this.overrideUserDataDir = best.userDataDir;
+          this.onConnected();
+          return;
+        } catch { /* fall through to error */ }
       }
     }
 
-    // P0-3: Use async resolve to try /json/version when file discovery fails
-    const { wsUrl } = await resolveWsUrlAsync(
-      this.overrideUserDataDir,
-      this.cdpHost,
-      this.cdpPort,
+    // All strategies failed — throw actionable error
+    throw new ActionableError(
+      'Could not find any browser with remote debugging enabled.',
+      `To fix, do ONE of these:\n` +
+      `  1. Chrome/Edge: Go to chrome://flags → search "remote debugging" → Enable → Relaunch\n` +
+      `  2. Or launch with flag: chrome --remote-debugging-port=9222\n` +
+      `  3. Or set CDP_PORT env var if using a non-standard port\n\n` +
+      `The server will auto-connect once debugging is enabled. No manual connect needed.`,
     );
-
-    await this.client.connect(wsUrl);
-    this.onConnected();
   }
 
   /** Update the override directory (e.g. after `browser.connect`). */

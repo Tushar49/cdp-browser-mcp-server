@@ -22,7 +22,7 @@ import { sleep } from '../utils/wait.js';
 interface FormField {
   uid: number;
   value?: string;
-  type?: 'auto' | 'text' | 'combobox' | 'checkbox' | 'radio' | 'select' | 'date' | 'file';
+  type?: 'auto' | 'text' | 'combobox' | 'checkbox' | 'radio' | 'select' | 'date' | 'file' | 'country-code' | 'location';
 }
 
 interface FormArgs {
@@ -331,8 +331,11 @@ async function fillCombobox(
   // 3. Type value char-by-char to trigger React/Angular search filtering
   for (const char of value) {
     await typeChar(ctx, sess, char);
-    await sleep(50);
+    await sleep(80);
   }
+
+  // Wait for debounced API calls (e.g., LinkedIn location autocomplete)
+  await sleep(1000);
 
   // P1-3: Get the combobox's aria-controls/aria-owns to scope option search
   let controlledListboxId: string | null = null;
@@ -353,7 +356,7 @@ async function fillCombobox(
   let matchedOption: { text: string; backendNodeId: number } | null = null;
   const pollStart = Date.now();
 
-  while (Date.now() - pollStart < 3000) {
+  while (Date.now() - pollStart < 5000) {
     await sleep(300);
 
     // Get fresh AX tree and look for option/listbox roles
@@ -481,7 +484,65 @@ async function fillCombobox(
     if (matchedOption) break;
 
     // If we have options but no match, keep polling briefly in case more load
-    if (candidates.length > 0 && Date.now() - pollStart > 1500) break;
+    if (candidates.length > 0 && Date.now() - pollStart > 2500) break;
+  }
+
+  // Retry with shorter prefix for autocomplete fields that need fewer chars
+  if (!matchedOption && optionTexts.length === 0 && value.length > 3) {
+    const shortValue = value.substring(0, 3);
+    // Clear and retype with shorter prefix
+    await ctx.sendCommand('Runtime.callFunctionOn', {
+      functionDeclaration: `function() {
+        if ('value' in this) {
+          const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+                            || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+          if (nativeSetter) nativeSetter.call(this, '');
+          else this.value = '';
+          this.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      }`,
+      objectId,
+      returnByValue: true,
+    }, sess);
+    await sleep(100);
+
+    for (const char of shortValue) {
+      await typeChar(ctx, sess, char);
+      await sleep(100);
+    }
+    await sleep(1500);
+
+    // Re-poll for options
+    const { nodes: retryNodes } = await ctx.sendCommand('Accessibility.getFullAXTree', {}, sess) as {
+      nodes: Array<{
+        nodeId: string;
+        backendDOMNodeId?: number;
+        ignored?: boolean;
+        role?: { value: string };
+        name?: { value: string };
+      }>;
+    };
+
+    const retryCandidates: Array<{ text: string; backendNodeId: number }> = [];
+    for (const node of retryNodes) {
+      if (node.ignored) continue;
+      const role = node.role?.value;
+      if (role === 'option' || role === 'menuitem' || role === 'listitem' || role === 'treeitem') {
+        const text = (node.name?.value || '').trim();
+        if (!text || !node.backendDOMNodeId) continue;
+        retryCandidates.push({ text, backendNodeId: node.backendDOMNodeId });
+        optionTexts.push(text);
+      }
+    }
+
+    if (retryCandidates.length > 0) {
+      const valueLower = value.toLowerCase();
+      matchedOption = retryCandidates.find(c => c.text.toLowerCase() === valueLower)
+        || retryCandidates.find(c => c.text.toLowerCase().startsWith(valueLower))
+        || retryCandidates.find(c => c.text.toLowerCase().includes(valueLower))
+        || retryCandidates.find(c => valueLower.includes(c.text.toLowerCase()))
+        || null;
+    }
   }
 
   // 6. Click the matched option
@@ -797,6 +858,159 @@ async function fillFile(
 
 // ─── Smart Fill Dispatch ────────────────────────────────────────────
 
+/** Common 2-letter ISO code → country name mapping */
+const CODE_TO_COUNTRY: Record<string, string> = {
+  US: 'United States', GB: 'United Kingdom', IN: 'India', CA: 'Canada',
+  AU: 'Australia', DE: 'Germany', FR: 'France', JP: 'Japan', CN: 'China',
+  BR: 'Brazil', MX: 'Mexico', KR: 'South Korea', IT: 'Italy', ES: 'Spain',
+  NL: 'Netherlands', SE: 'Sweden', NO: 'Norway', DK: 'Denmark', FI: 'Finland',
+  PL: 'Poland', RU: 'Russia', ZA: 'South Africa', SG: 'Singapore', NZ: 'New Zealand',
+  AE: 'United Arab Emirates', SA: 'Saudi Arabia', IE: 'Ireland', CH: 'Switzerland',
+  AT: 'Austria', BE: 'Belgium', PT: 'Portugal', IL: 'Israel', PH: 'Philippines',
+};
+
+/**
+ * Normalize a country code input to a search-friendly string.
+ * "+91" → "91", "IN" → "India", "India" → "India".
+ * Exported for testing.
+ */
+export function normalizeCountryCode(value: string): string {
+  let searchTerm = value.trim();
+  if (searchTerm.startsWith('+')) {
+    searchTerm = searchTerm.substring(1);
+  }
+  if (searchTerm.length === 2 && CODE_TO_COUNTRY[searchTerm.toUpperCase()]) {
+    searchTerm = CODE_TO_COUNTRY[searchTerm.toUpperCase()];
+  }
+  return searchTerm;
+}
+
+/**
+ * Country code dropdown handler.
+ * Handles custom comboboxes for phone country codes (+91, India, IN).
+ * Normalizes input: "+91" → search for "91", "India" → search for "India", "IN" → search for "India".
+ */
+async function fillCountryCode(
+  ctx: ServerContext,
+  sess: string,
+  uid: number,
+  value: string,
+  tabId?: string,
+): Promise<FieldResult> {
+  const axInfo = await getAXNodeInfo(ctx, sess, uid, tabId);
+
+  const searchTerm = normalizeCountryCode(value);
+
+  // Use combobox handler with the normalized search term
+  return fillCombobox(ctx, sess, uid, searchTerm, tabId);
+}
+
+/**
+ * Location autocomplete handler.
+ * Types slowly, waits for API-driven suggestions, selects first match.
+ */
+async function fillLocation(
+  ctx: ServerContext,
+  sess: string,
+  uid: number,
+  value: string,
+  tabId?: string,
+): Promise<FieldResult> {
+  const { objectId } = await resolveUidToObjectId(ctx, sess, uid, tabId);
+  const axInfo = await getAXNodeInfo(ctx, sess, uid, tabId);
+
+  // Focus and clear
+  await ctx.sendCommand('Runtime.callFunctionOn', {
+    functionDeclaration: `function() {
+      this.scrollIntoView({ block: "center" });
+      this.focus();
+      if ('value' in this) {
+        const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+                          || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+        if (nativeSetter) nativeSetter.call(this, '');
+        else this.value = '';
+        this.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    }`,
+    objectId,
+    returnByValue: true,
+  }, sess);
+
+  // Type slowly (100ms per char) for API-driven autocomplete
+  for (const char of value) {
+    await typeChar(ctx, sess, char);
+    await sleep(100);
+  }
+
+  // Wait 2s for API suggestions to load
+  await sleep(2000);
+
+  // Look for suggestions listbox/menu
+  const { nodes } = await ctx.sendCommand('Accessibility.getFullAXTree', {}, sess) as {
+    nodes: Array<{
+      nodeId: string;
+      backendDOMNodeId?: number;
+      ignored?: boolean;
+      role?: { value: string };
+      name?: { value: string };
+    }>;
+  };
+
+  const candidates: Array<{ text: string; backendNodeId: number }> = [];
+  for (const node of nodes) {
+    if (node.ignored) continue;
+    const role = node.role?.value;
+    if (role === 'option' || role === 'menuitem' || role === 'listitem') {
+      const text = (node.name?.value || '').trim();
+      if (text && node.backendDOMNodeId) {
+        candidates.push({ text, backendNodeId: node.backendDOMNodeId });
+      }
+    }
+  }
+
+  if (candidates.length > 0) {
+    // Find best match
+    const valueLower = value.toLowerCase();
+    const match = candidates.find(c => c.text.toLowerCase() === valueLower)
+      || candidates.find(c => c.text.toLowerCase().includes(valueLower))
+      || candidates.find(c => valueLower.includes(c.text.toLowerCase()))
+      || candidates[0]; // Select first suggestion if no text match
+
+    try {
+      const resolved = await ctx.sendCommand('DOM.resolveNode', {
+        backendNodeId: match.backendNodeId,
+      }, sess) as { object: { objectId: string } };
+
+      if (resolved?.object?.objectId) {
+        await ctx.sendCommand('Runtime.callFunctionOn', {
+          functionDeclaration: `function() {
+            this.scrollIntoView({ block: "center" });
+            this.click();
+          }`,
+          objectId: resolved.object.objectId,
+          returnByValue: true,
+        }, sess);
+
+        return {
+          uid,
+          role: axInfo.role,
+          success: true,
+          message: `selected location "${match.text}"`,
+        };
+      }
+    } catch { /* fall through */ }
+  }
+
+  // No suggestions — press Enter to accept typed value
+  await pressKey(ctx, sess, 'Enter');
+  return {
+    uid,
+    role: axInfo.role,
+    success: true,
+    message: `"${value}" (no suggestions — submitted as typed)`,
+  };
+}
+
 async function smartFillField(
   ctx: ServerContext,
   sess: string,
@@ -818,6 +1032,10 @@ async function smartFillField(
       return fillText(ctx, sess, uid, value, tabId);
     case 'combobox':
       return fillCombobox(ctx, sess, uid, value, tabId);
+    case 'country-code':
+      return fillCountryCode(ctx, sess, uid, value, tabId);
+    case 'location':
+      return fillLocation(ctx, sess, uid, value, tabId);
     case 'checkbox':
       return fillCheckbox(ctx, sess, uid, value, tabId);
     case 'radio':
@@ -955,33 +1173,17 @@ function formatResults(action: string, results: FieldResult[]): string {
 // ─── Tool Description ───────────────────────────────────────────────
 
 const FORM_DESCRIPTION = [
-  'Smart form filling — handles text, combobox, checkbox, radio, date, file uploads, and multi-select in a single call.',
+  'Smart form filling — handles text, combobox, checkbox, radio, select, date, file, country-code, location in one call.',
+  'Auto-detects field type from a11y role. For comboboxes, types char-by-char and waits for dropdown options.',
   '',
-  'Automatically detects field type from accessibility tree role. For React/Greenhouse comboboxes,',
-  'types the value char-by-char, waits for dropdown options, and auto-selects the best match.',
+  'Actions: fill (set values), read (get current values), clear (reset fields).',
   '',
-  'Actions:',
-  '- fill: Set field values. Auto-detects type from a11y role, or override with type parameter.',
-  '- read: Get current values of specified fields from the accessibility tree.',
-  '- clear: Reset all specified fields (clear text, uncheck checkboxes).',
+  'Field types (auto-detected): textbox/searchbox/textarea → text, combobox → char-by-char + dropdown,',
+  'checkbox/switch → toggle, radio → click, listbox/select → native or custom dropdown,',
+  'country-code → normalizes +91/India/IN, location → slow type + API autocomplete.',
   '',
-  'Supported field types (auto-detected from role):',
-  '  textbox/searchbox/textarea → types value with React-compatible events',
-  '  combobox → types char-by-char, waits for dropdown, selects best match',
-  '  checkbox/switch → toggles checked state',
-  '  radio → clicks the radio button',
-  '  listbox/select → sets native <select> or handles custom dropdowns',
-  '  spinbutton → treated as text input',
-  '',
-  'Example:',
-  '  form({ action: "fill", tabId: "...", fields: [',
-  '    { uid: 5, value: "John Doe" },',
-  '    { uid: 8, value: "Bachelor\'s Degree" },',
-  '    { uid: 12, value: "true" },',
-  '    { uid: 15, value: "India" }',
-  '  ]})',
-  '',
-  'Always take a snapshot first to get uid refs for the fields you want to fill.',
+  'Example: form({ action: "fill", tabId: "...", fields: [{ uid: 5, value: "John" }, { uid: 8, value: "India", type: "location" }] })',
+  'Always take a snapshot first to get uid refs.',
 ].join('\n');
 
 // ─── Input Schema ───────────────────────────────────────────────────
@@ -1014,7 +1216,7 @@ const FORM_INPUT_SCHEMA = {
           },
           type: {
             type: 'string' as const,
-            enum: ['auto', 'text', 'combobox', 'checkbox', 'radio', 'select', 'date', 'file'] as const,
+            enum: ['auto', 'text', 'combobox', 'checkbox', 'radio', 'select', 'date', 'file', 'country-code', 'location'] as const,
             description: 'Field type. Default "auto" detects from a11y role.',
           },
         },
