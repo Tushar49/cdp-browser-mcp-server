@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Complex Form — LinkedIn Easy Apply / Greenhouse Style</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+    .field { margin-bottom: 1rem; }
+    label { display: block; font-weight: 600; margin-bottom: 4px; }
+    input[type="text"], input[type="email"], input[type="tel"] { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+    .combobox-wrapper { position: relative; }
+    .combobox-wrapper input { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+    .combobox-list { position: absolute; top: 100%; left: 0; right: 0; background: #fff; border: 1px solid #ccc; border-top: none; max-height: 200px; overflow-y: auto; display: none; z-index: 10; }
+    .combobox-list .option { padding: 8px; cursor: pointer; }
+    .combobox-list .option:hover, .combobox-list .option.highlighted { background: #e8f0fe; }
+    .drop-zone { border: 2px dashed #aaa; border-radius: 8px; padding: 2rem; text-align: center; color: #888; margin-top: 4px; }
+    .drop-zone.dragover { border-color: #1a73e8; background: #f0f6ff; }
+    .checkbox-group label, .radio-group label { display: inline-flex; align-items: center; gap: 4px; margin-right: 1rem; font-weight: normal; }
+    button[type="submit"] { background: #1a73e8; color: #fff; border: none; padding: 10px 24px; border-radius: 4px; cursor: pointer; font-size: 1rem; }
+    button[type="submit"]:hover { background: #1558b0; }
+    #result { margin-top: 1rem; background: #f5f5f5; padding: 1rem; border-radius: 4px; white-space: pre-wrap; display: none; }
+  </style>
+</head>
+<body>
+  <h1>Job Application</h1>
+  <form id="app-form">
+    <!-- Text inputs with React-style onChange -->
+    <div class="field">
+      <label for="full-name">Full Name</label>
+      <input type="text" id="full-name" name="fullName" placeholder="Jane Doe" autocomplete="name" required />
+    </div>
+    <div class="field">
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" placeholder="jane@example.com" required />
+    </div>
+
+    <!-- Country code dropdown (custom combobox, not native select) -->
+    <div class="field">
+      <label for="country-code">Phone Country Code</label>
+      <div class="combobox-wrapper" role="combobox" aria-expanded="false" aria-haspopup="listbox">
+        <input type="text" id="country-code" name="countryCode" placeholder="Search country..." autocomplete="off"
+               role="searchbox" aria-autocomplete="list" aria-controls="country-list" />
+        <div id="country-list" class="combobox-list" role="listbox" aria-label="Country codes"></div>
+      </div>
+    </div>
+    <div class="field">
+      <label for="phone">Phone Number</label>
+      <input type="tel" id="phone" name="phone" placeholder="9876543210" />
+    </div>
+
+    <!-- Location autocomplete (input with datalist + async suggestions) -->
+    <div class="field">
+      <label for="location">Location</label>
+      <div class="combobox-wrapper" role="combobox" aria-expanded="false" aria-haspopup="listbox">
+        <input type="text" id="location" name="location" placeholder="Start typing a city..."
+               role="searchbox" aria-autocomplete="list" aria-controls="location-list" autocomplete="off" />
+        <div id="location-list" class="combobox-list" role="listbox" aria-label="Location suggestions"></div>
+      </div>
+    </div>
+
+    <!-- File upload (input type=file + drag zone) -->
+    <div class="field">
+      <label>Resume / CV</label>
+      <input type="file" id="resume" name="resume" accept=".pdf,.doc,.docx" />
+      <div class="drop-zone" id="drop-zone">Or drag and drop your file here</div>
+    </div>
+
+    <!-- Multi-select checkboxes -->
+    <div class="field">
+      <label>Skills (select all that apply)</label>
+      <div class="checkbox-group">
+        <label><input type="checkbox" name="skills" value="javascript" /> JavaScript</label>
+        <label><input type="checkbox" name="skills" value="typescript" /> TypeScript</label>
+        <label><input type="checkbox" name="skills" value="python" /> Python</label>
+        <label><input type="checkbox" name="skills" value="react" /> React</label>
+        <label><input type="checkbox" name="skills" value="node" /> Node.js</label>
+      </div>
+    </div>
+
+    <!-- Radio button groups -->
+    <div class="field">
+      <label>Experience Level</label>
+      <div class="radio-group">
+        <label><input type="radio" name="experience" value="junior" /> Junior (0-2 years)</label>
+        <label><input type="radio" name="experience" value="mid" /> Mid (3-5 years)</label>
+        <label><input type="radio" name="experience" value="senior" /> Senior (6+ years)</label>
+      </div>
+    </div>
+    <div class="field">
+      <label>Work Authorization</label>
+      <div class="radio-group">
+        <label><input type="radio" name="workAuth" value="citizen" /> Citizen</label>
+        <label><input type="radio" name="workAuth" value="visa" /> Visa Holder</label>
+        <label><input type="radio" name="workAuth" value="other" /> Other</label>
+      </div>
+    </div>
+
+    <button type="submit">Submit Application</button>
+  </form>
+  <pre id="result"></pre>
+
+  <script>
+    // --- Country code combobox ---
+    const COUNTRIES = [
+      { code: '+1', name: 'United States', iso: 'US' },
+      { code: '+1', name: 'Canada', iso: 'CA' },
+      { code: '+44', name: 'United Kingdom', iso: 'GB' },
+      { code: '+91', name: 'India', iso: 'IN' },
+      { code: '+49', name: 'Germany', iso: 'DE' },
+      { code: '+33', name: 'France', iso: 'FR' },
+      { code: '+81', name: 'Japan', iso: 'JP' },
+      { code: '+86', name: 'China', iso: 'CN' },
+      { code: '+61', name: 'Australia', iso: 'AU' },
+      { code: '+55', name: 'Brazil', iso: 'BR' },
+      { code: '+52', name: 'Mexico', iso: 'MX' },
+      { code: '+82', name: 'South Korea', iso: 'KR' },
+      { code: '+65', name: 'Singapore', iso: 'SG' },
+      { code: '+971', name: 'United Arab Emirates', iso: 'AE' },
+    ];
+
+    const countryInput = document.getElementById('country-code');
+    const countryList = document.getElementById('country-list');
+    const comboWrapper = countryInput.closest('[role="combobox"]');
+
+    function renderCountryOptions(filter) {
+      const q = (filter || '').toLowerCase();
+      const matches = COUNTRIES.filter(c =>
+        c.name.toLowerCase().includes(q) || c.code.includes(q) || c.iso.toLowerCase().includes(q)
+      );
+      countryList.innerHTML = '';
+      matches.forEach(c => {
+        const div = document.createElement('div');
+        div.className = 'option';
+        div.setAttribute('role', 'option');
+        div.textContent = `${c.name} (${c.code})`;
+        div.dataset.value = `${c.iso}:${c.code}`;
+        div.addEventListener('click', () => {
+          countryInput.value = `${c.name} (${c.code})`;
+          countryList.style.display = 'none';
+          comboWrapper.setAttribute('aria-expanded', 'false');
+          countryInput.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        countryList.appendChild(div);
+      });
+      countryList.style.display = matches.length ? 'block' : 'none';
+      comboWrapper.setAttribute('aria-expanded', matches.length ? 'true' : 'false');
+    }
+
+    // Debounce to simulate API latency
+    let countryTimer;
+    countryInput.addEventListener('input', (e) => {
+      clearTimeout(countryTimer);
+      countryTimer = setTimeout(() => renderCountryOptions(e.target.value), 300);
+    });
+    countryInput.addEventListener('focus', () => renderCountryOptions(countryInput.value));
+    document.addEventListener('click', (e) => {
+      if (!comboWrapper.contains(e.target)) {
+        countryList.style.display = 'none';
+        comboWrapper.setAttribute('aria-expanded', 'false');
+      }
+    });
+
+    // --- Location autocomplete ---
+    const CITIES = [
+      'San Francisco, CA, USA', 'New York, NY, USA', 'London, UK',
+      'Berlin, Germany', 'Paris, France', 'Tokyo, Japan',
+      'Mumbai, India', 'Bangalore, India', 'Sydney, Australia',
+      'Toronto, Canada', 'Singapore', 'Dubai, UAE',
+    ];
+
+    const locationInput = document.getElementById('location');
+    const locationList = document.getElementById('location-list');
+    const locationWrapper = locationInput.closest('[role="combobox"]');
+
+    let locationTimer;
+    locationInput.addEventListener('input', (e) => {
+      clearTimeout(locationTimer);
+      // Simulate async API call with 500ms debounce
+      locationTimer = setTimeout(() => {
+        const q = (e.target.value || '').toLowerCase();
+        const matches = q.length >= 2
+          ? CITIES.filter(c => c.toLowerCase().includes(q))
+          : [];
+        locationList.innerHTML = '';
+        matches.forEach(city => {
+          const div = document.createElement('div');
+          div.className = 'option';
+          div.setAttribute('role', 'option');
+          div.textContent = city;
+          div.addEventListener('click', () => {
+            locationInput.value = city;
+            locationList.style.display = 'none';
+            locationWrapper.setAttribute('aria-expanded', 'false');
+            locationInput.dispatchEvent(new Event('change', { bubbles: true }));
+          });
+          locationList.appendChild(div);
+        });
+        locationList.style.display = matches.length ? 'block' : 'none';
+        locationWrapper.setAttribute('aria-expanded', matches.length ? 'true' : 'false');
+      }, 500);
+    });
+    document.addEventListener('click', (e) => {
+      if (!locationWrapper.contains(e.target)) {
+        locationList.style.display = 'none';
+        locationWrapper.setAttribute('aria-expanded', 'false');
+      }
+    });
+
+    // --- Drag-and-drop zone ---
+    const dropZone = document.getElementById('drop-zone');
+    const resumeInput = document.getElementById('resume');
+    dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('dragover');
+      if (e.dataTransfer.files.length) {
+        resumeInput.files = e.dataTransfer.files;
+        dropZone.textContent = `File: ${e.dataTransfer.files[0].name}`;
+      }
+    });
+
+    // --- React-style onChange simulation for text inputs ---
+    document.querySelectorAll('input[type="text"], input[type="email"], input[type="tel"]').forEach(input => {
+      input.addEventListener('input', (e) => {
+        // Simulate React controlled component behavior
+        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype, 'value'
+        )?.set;
+        if (nativeInputValueSetter) {
+          // Value is already set by the event, just dispatch React-compatible events
+          e.target.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      });
+    });
+
+    // --- Form submission ---
+    document.getElementById('app-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const data = {};
+      for (const [key, val] of fd.entries()) {
+        if (data[key]) {
+          if (Array.isArray(data[key])) data[key].push(val);
+          else data[key] = [data[key], val];
+        } else {
+          data[key] = val;
+        }
+      }
+      const result = document.getElementById('result');
+      result.textContent = JSON.stringify(data, null, 2);
+      result.style.display = 'block';
+    });
+  </script>
+</body>
+</html>

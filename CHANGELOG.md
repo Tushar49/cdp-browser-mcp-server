@@ -2,14 +2,28 @@
 
 All notable changes to CDP Browser MCP Server will be documented in this file.
 
-## [Unreleased]
+## [5.0.0-alpha.3] - 2026-05-12
 
 ### Added
-- **Slim mode** (`CDP_SLIM_MODE=true`) — Exposes 6 Playwright-compatible tools (`browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_fill_form`, `browser_tabs`) instead of 15 full tools. Designed for 32K-context models that can't fit large tool schemas
-- **Interactive-only snapshots** — `page.snapshot({ interactive: true })` returns only actionable elements (buttons, inputs, links, dropdowns) plus headings for context
-- **Snapshot search** — `page.snapshot({ search: "Submit" })` filters to elements matching query text
-- **Snapshot length cap** — `page.snapshot({ maxLength: 8000 })` truncates output with smart line-boundary cuts
-- **Diagnosis report** — `.research/DiagnosisReport.md` documenting 15 failure patterns from production chat sessions
+- **Slim Mode** (`CDP_SLIM_MODE=true`) — 6 Playwright-compatible tools for small-context models (32K). Schema drops from ~8KB to ~1.5KB.
+- **Interactive-only snapshots** — `page.snapshot({ interactive: true })` returns only buttons, inputs, links
+- **Search in snapshots** — `page.snapshot({ search: "Login" })` filters to matching elements
+- **Snapshot length cap** — `page.snapshot({ maxLength: 8000 })` with smart line-boundary truncation
+- **Country code handler** — form.fill understands +91, India, IN for phone country code fields
+- **Location autocomplete** — form.fill handles debounced address/location autocomplete inputs
+- **Network settle after clicks** — Playwright-style waitForNetworkSettle after interactions
+
+### Fixed
+- Auto-connect: 3-strategy connection (cached URL → port probe → file discovery)
+- Connection errors now show EXACT fix steps (chrome://flags instruction)
+- Combobox timing: 80ms char delay, 1s debounce, 5s poll (was 50ms/3s)
+- Short-prefix retry for comboboxes when full value yields no results
+- Tool descriptions trimmed 40% for lower token cost
+
+### Changed
+- Version: 5.0.0-alpha.3
+
+## [Unreleased]
 
 ## [5.0.0-alpha.2] - 2026-04-22
 

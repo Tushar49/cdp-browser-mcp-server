@@ -226,6 +226,148 @@ describe('TokenOptimizer', () => {
       expect(result[0].children![0].children).toEqual([]);
     });
   });
+
+  describe('interactiveOnly()', () => {
+    it('should keep buttons, links, inputs', () => {
+      const tree: AXNode[] = [
+        node('button', 'Submit'),
+        node('link', 'Help'),
+        node('textbox', 'Name'),
+        node('checkbox', 'Agree'),
+        node('combobox', 'Country'),
+      ];
+      const result = TokenOptimizer.interactiveOnly(tree);
+      expect(result).toHaveLength(5);
+      expect(flattenRoles(result)).toEqual(['button', 'link', 'textbox', 'checkbox', 'combobox']);
+    });
+
+    it('should remove generic, paragraph, group nodes', () => {
+      const tree: AXNode[] = [
+        node('generic', 'wrapper'),
+        node('paragraph', 'Some text'),
+        node('group', 'Section', [
+          node('button', 'OK'),
+        ]),
+      ];
+      const result = TokenOptimizer.interactiveOnly(tree);
+      const roles = flattenRoles(result);
+      expect(roles).toContain('button');
+      expect(roles).not.toContain('generic');
+      expect(roles).not.toContain('paragraph');
+    });
+
+    it('should keep headings for context', () => {
+      const tree: AXNode[] = [
+        node('heading', 'Login Form'),
+        node('textbox', 'Username'),
+      ];
+      const result = TokenOptimizer.interactiveOnly(tree);
+      expect(result).toHaveLength(2);
+      expect(result[0].role).toBe('heading');
+    });
+
+    it('should keep named images', () => {
+      const tree: AXNode[] = [
+        node('img', 'Logo'),
+        node('img', ''),
+      ];
+      const result = TokenOptimizer.interactiveOnly(tree);
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('Logo');
+    });
+  });
+
+  describe('search()', () => {
+    it('should find nodes by name', () => {
+      const tree: AXNode[] = [
+        node('button', 'Login'),
+        node('button', 'Sign Up'),
+        node('link', 'Forgot Password'),
+      ];
+      const result = TokenOptimizer.search(tree, 'Login');
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('Login');
+    });
+
+    it('should find nodes by value', () => {
+      const tree: AXNode[] = [
+        node('textbox', 'Email', undefined, { value: 'john@example.com' }),
+        node('textbox', 'Phone', undefined, { value: '555-1234' }),
+      ];
+      const result = TokenOptimizer.search(tree, 'john@');
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('Email');
+    });
+
+    it('should find nodes by description', () => {
+      const tree: AXNode[] = [
+        node('button', 'Submit', undefined, { description: 'Submit the application form' }),
+        node('button', 'Cancel'),
+      ];
+      const result = TokenOptimizer.search(tree, 'application');
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('Submit');
+    });
+
+    it('should return empty for no match', () => {
+      const tree: AXNode[] = [
+        node('button', 'Login'),
+        node('link', 'Help'),
+      ];
+      const result = TokenOptimizer.search(tree, 'NonExistent');
+      expect(result).toHaveLength(0);
+    });
+
+    it('should be case-insensitive', () => {
+      const tree: AXNode[] = [
+        node('button', 'LOGIN BUTTON'),
+      ];
+      const result = TokenOptimizer.search(tree, 'login');
+      expect(result).toHaveLength(1);
+    });
+
+    it('should find nested matching nodes', () => {
+      const tree: AXNode[] = [
+        node('group', 'Nav', [
+          node('link', 'Dashboard'),
+          node('link', 'Settings'),
+        ]),
+      ];
+      const result = TokenOptimizer.search(tree, 'Dashboard');
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('Dashboard');
+    });
+  });
+
+  describe('capLength()', () => {
+    it('should not truncate short snapshots', () => {
+      const short = 'button "OK" [ref=1]\nlink "Help" [ref=2]';
+      expect(TokenOptimizer.capLength(short, 1000)).toBe(short);
+    });
+
+    it('should truncate at line boundary', () => {
+      const lines = Array.from({ length: 100 }, (_, i) => `button "Item ${i}" [ref=${i}]`);
+      const serialized = lines.join('\n');
+      const result = TokenOptimizer.capLength(serialized, 500);
+      expect(result.length).toBeLessThanOrEqual(serialized.length);
+      // Should not break mid-line
+      const lastNewline = result.lastIndexOf('\n\n... (truncated');
+      expect(lastNewline).toBeGreaterThan(0);
+    });
+
+    it('should include truncation message', () => {
+      const long = 'x'.repeat(1000) + '\n' + 'y'.repeat(1000);
+      const result = TokenOptimizer.capLength(long, 500);
+      expect(result).toContain('truncated');
+      expect(result).toContain('chars');
+      expect(result).toContain('search parameter');
+    });
+
+    it('should return original when length equals maxChars', () => {
+      const exact = 'a'.repeat(500);
+      expect(TokenOptimizer.capLength(exact, 500)).toBe(exact);
+    });
+  });
 });
 
 /** Flatten all roles in a tree into a flat array for easy assertions. */

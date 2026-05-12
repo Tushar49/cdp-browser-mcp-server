@@ -858,6 +858,33 @@ async function fillFile(
 
 // ─── Smart Fill Dispatch ────────────────────────────────────────────
 
+/** Common 2-letter ISO code → country name mapping */
+const CODE_TO_COUNTRY: Record<string, string> = {
+  US: 'United States', GB: 'United Kingdom', IN: 'India', CA: 'Canada',
+  AU: 'Australia', DE: 'Germany', FR: 'France', JP: 'Japan', CN: 'China',
+  BR: 'Brazil', MX: 'Mexico', KR: 'South Korea', IT: 'Italy', ES: 'Spain',
+  NL: 'Netherlands', SE: 'Sweden', NO: 'Norway', DK: 'Denmark', FI: 'Finland',
+  PL: 'Poland', RU: 'Russia', ZA: 'South Africa', SG: 'Singapore', NZ: 'New Zealand',
+  AE: 'United Arab Emirates', SA: 'Saudi Arabia', IE: 'Ireland', CH: 'Switzerland',
+  AT: 'Austria', BE: 'Belgium', PT: 'Portugal', IL: 'Israel', PH: 'Philippines',
+};
+
+/**
+ * Normalize a country code input to a search-friendly string.
+ * "+91" → "91", "IN" → "India", "India" → "India".
+ * Exported for testing.
+ */
+export function normalizeCountryCode(value: string): string {
+  let searchTerm = value.trim();
+  if (searchTerm.startsWith('+')) {
+    searchTerm = searchTerm.substring(1);
+  }
+  if (searchTerm.length === 2 && CODE_TO_COUNTRY[searchTerm.toUpperCase()]) {
+    searchTerm = CODE_TO_COUNTRY[searchTerm.toUpperCase()];
+  }
+  return searchTerm;
+}
+
 /**
  * Country code dropdown handler.
  * Handles custom comboboxes for phone country codes (+91, India, IN).
@@ -872,26 +899,7 @@ async function fillCountryCode(
 ): Promise<FieldResult> {
   const axInfo = await getAXNodeInfo(ctx, sess, uid, tabId);
 
-  // Normalize the search term
-  let searchTerm = value.trim();
-  if (searchTerm.startsWith('+')) {
-    searchTerm = searchTerm.substring(1); // "+91" → "91"
-  }
-
-  // Common 2-letter code → country name mapping
-  const CODE_TO_COUNTRY: Record<string, string> = {
-    US: 'United States', GB: 'United Kingdom', IN: 'India', CA: 'Canada',
-    AU: 'Australia', DE: 'Germany', FR: 'France', JP: 'Japan', CN: 'China',
-    BR: 'Brazil', MX: 'Mexico', KR: 'South Korea', IT: 'Italy', ES: 'Spain',
-    NL: 'Netherlands', SE: 'Sweden', NO: 'Norway', DK: 'Denmark', FI: 'Finland',
-    PL: 'Poland', RU: 'Russia', ZA: 'South Africa', SG: 'Singapore', NZ: 'New Zealand',
-    AE: 'United Arab Emirates', SA: 'Saudi Arabia', IE: 'Ireland', CH: 'Switzerland',
-    AT: 'Austria', BE: 'Belgium', PT: 'Portugal', IL: 'Israel', PH: 'Philippines',
-  };
-
-  if (searchTerm.length === 2 && CODE_TO_COUNTRY[searchTerm.toUpperCase()]) {
-    searchTerm = CODE_TO_COUNTRY[searchTerm.toUpperCase()];
-  }
+  const searchTerm = normalizeCountryCode(value);
 
   // Use combobox handler with the normalized search term
   return fillCombobox(ctx, sess, uid, searchTerm, tabId);
